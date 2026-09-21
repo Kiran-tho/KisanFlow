@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KisanFlow</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <a class="logo" href="/">🌾 KisanFlow</a>
+  <div id="langSwitcher" class="langSwitcher" role="group" aria-label="Language"></div>
+  <nav>
+    <a href="/login" data-i18n="home.farmerLogin">Farmer Login</a>
+    <a href="/register" data-i18n="register.button">Create account</a>
+    <a href="/admin" data-i18n="home.adminLogin">Centre Admin</a>
+  </nav>
+</header>
+<main class="hero">
+  <div>
+    <small data-i18n="home.tagline">SIH26032 • SMART PROCUREMENT</small>
+    <h1><span data-i18n="home.title1">Less waiting.</span><br><span class="accent" data-i18n="home.title2">Smarter procurement.</span></h1>
+    <p data-i18n="home.subtitle">Farmers create a private account, book a capacity-controlled slot, receive a token and get a targeted notification when the centre calls them.</p>
+    <a class="btn" href="/register" data-i18n="home.cta">Create farmer account →</a>
+  </div>
+  <div class="mock">
+    <div><span data-i18n="home.liveQueue">LIVE QUEUE</span> <b>● <span data-i18n="home.online">ONLINE</span></b></div>
+    <strong>#127</strong>
+    <h3 data-i18n="home.tokenCalled">🔔 Your token is called</h3>
+    <div class="bar"><i></i></div>
+  </div>
+</main>
+<section class="cards">
+  <div>
+    🎟️ <b data-i18n="home.featureTokenTitle">Digital token</b>
+    <p data-i18n="home.featureTokenBody">Every booking gets a queue number.</p>
+  </div>
+  <div>
+    🔔 <b data-i18n="home.featureNotifyTitle">Targeted notification</b>
+    <p data-i18n="home.featureNotifyBody">Admin calling one farmer reaches that farmer’s account only.</p>
+  </div>
+</section>
+<script src="/static/i18n.strings.js"></script>
+<script src="/static/i18n.js"></script>
+</body>
+</html>

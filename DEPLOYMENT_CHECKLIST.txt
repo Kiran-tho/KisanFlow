@@ -1,0 +1,34 @@
+KISANFLOW v13 - CLOUD DEPLOYMENT CHECKLIST
+==========================================
+
+1. Push this project to a GitHub repository (do not commit .env or procurement.db).
+2. Create a managed PostgreSQL database in your cloud provider.
+3. Create a Python web service from the repository.
+4. Build command:
+   pip install -r requirements.txt
+5. Start command:
+   gunicorn app:app
+6. Environment variables:
+   DATABASE_URL=<PostgreSQL connection string>
+   SECRET_KEY=<long random secret>
+   COOKIE_SECURE=1
+   FLASK_DEBUG=0
+   (optional) LOGIN_ATTEMPT_LIMIT=12, REGISTER_ATTEMPT_LIMIT=20, PORT=5000
+7. Open /health on the public URL. It must return:
+   {"status":"ok","database":"connected","engine":"postgresql"}
+   If it returns 503 with database "unavailable", fix DATABASE_URL first.
+8. Open the public URL on the admin laptop and on the farmer phones (same URL for all towns).
+9. Admin logs in at /admin and creates slots with a capacity.
+10. Farmers register/login and book slots; each booking creates a unique token.
+11. Admin presses CALL FARMER on the dashboard. Only that farmer's account shows
+    "YOU ARE BEING CALLED"; other farmers stay Waiting.
+12. Admin then presses START SERVING and MARK COMPLETE (or "Next in queue") to move the queue.
+
+Notes
+-----
+* The schema is created automatically on first start (CREATE TABLE/INDEX IF NOT EXISTS plus
+  a seeded admin). No manual migration is required, and existing data is never dropped.
+* Configure the reverse proxy to forward X-Forwarded-For/Proto/Host (ProxyFix is enabled).
+* Change the demo admin password (admin@kisanflow.com / Admin@123) before any pilot.
+* The application writes useful errors to its log; no passwords or secrets are logged.
+

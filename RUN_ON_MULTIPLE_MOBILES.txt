@@ -1,0 +1,26 @@
+KISANFLOW v7 - MULTIPLE MOBILE PHONES (LOCAL WIFI)
+
+1. On the laptop, open this folder in VS Code.
+2. Open PowerShell in the kisanv6 folder.
+3. Run:
+   .\venv\Scripts\python.exe -m pip install -r requirements.txt
+4. Start server:
+   .\venv\Scripts\python.exe app.py
+5. Find laptop IPv4 address:
+   ipconfig
+   Look under Wi-Fi for IPv4 Address, for example 192.168.1.10
+6. On every phone connected to the SAME Wi-Fi, open:
+   http://192.168.1.10:5000
+   Replace 192.168.1.10 with your laptop IPv4 address.
+
+IMPORTANT:
+- Do NOT use 127.0.0.1 on the phone.
+- All phones and the laptop must be on the same Wi-Fi for this local version.
+- Windows Firewall may ask permission. Allow Python on Private networks.
+- Each farmer can register/login with a separate account.
+- Admin uses /admin and the demo admin credentials from README.
+- When admin calls a farmer, that farmer's open frontend receives the in-app notification.
+- Keep the farmer page open for the notification polling to work.
+
+FOR PHONES IN DIFFERENT TOWNS:
+This LAN version is only for local testing. The next step is cloud deployment with PostgreSQL so phones can connect from anywhere.

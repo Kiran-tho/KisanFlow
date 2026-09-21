@@ -1,0 +1,1 @@
+KisanFlow v10 dashboard fix: corrected /api/bookings ORDER BY to use s.slot_date (bookings table has no slot_date column). Also fixed admin 401 redirect.

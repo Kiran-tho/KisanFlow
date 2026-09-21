@@ -1,0 +1,1 @@
+KisanFlow v12 adds a My Turn / Status menu, live queue/status checking, persistent in-app call alert, and mobile-friendly status card.

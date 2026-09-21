@@ -1,0 +1,1 @@
+V11 notification fix: in-app notifications now persist until explicitly marked read; frontend polls notifications every 2 seconds; browser notifications are attempted only in secure contexts; LAN HTTP still gets the in-app alert and vibration when supported.

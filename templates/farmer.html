@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Farmer | KisanFlow</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <a class="logo" href="/">🌾 KisanFlow</a>
+  <nav class="farmerNav">
+    <div id="langSwitcher" class="langSwitcher" role="group" aria-label="Language"></div>
+    <button class="statusMenu" onclick="openStatus()" data-i18n="farmer.myTurn">🔔 My Turn / Status</button>
+    <span class="farmerBadge">FARMER • {{ user.name }}</span>
+    <button class="linkBtn" onclick="logout()" data-i18n="common.logout">Logout</button>
+  </nav>
+</header>
+
+<div id="turnToast" class="turnToast hidden"></div>
+
+<main class="page">
+  <div id="bookingArea">
+    <div class="title">
+      <small data-i18n="farmer.small">FARMER BOOKING</small>
+      <h1 data-i18n="farmer.title">Book your procurement visit</h1>
+      <p><span data-i18n="farmer.account">Your account:</span> <b>{{ user.phone }}</b></p>
+    </div>
+    <div class="card form">
+      <label>
+        <span data-i18n="farmer.centreLabel">Procurement centre</span>
+        <select id="centre"></select>
+      </label>
+      <label>
+        <span data-i18n="farmer.date">Date</span>
+        <input id="date" type="date">
+      </label>
+      <label>
+        <span data-i18n="farmer.crop">Crop</span>
+        <select id="crop">
+          <option value="Rice" data-i18n="crop.rice">Rice</option>
+          <option value="Wheat" data-i18n="crop.wheat">Wheat</option>
+          <option value="Maize" data-i18n="crop.maize">Maize</option>
+          <option value="Cotton" data-i18n="crop.cotton">Cotton</option>
+          <option value="Other" data-i18n="crop.other">Other</option>
+        </select>
+      </label>
+      <div>
+        <b data-i18n="farmer.slots">Available slots</b>
+        <div id="slots" class="slots" aria-live="polite">Loading...</div>
+      </div>
+      <button id="bookBtn" class="btn wide" onclick="book()" data-i18n="farmer.book">Confirm booking</button>
+      <div id="result" class="resultBox" role="status"></div>
+    </div>
+  </div>
+
+  <div id="ticketArea" class="hidden">
+    <div class="title">
+      <small data-i18n="farmer.privateSmall">YOUR PRIVATE BOOKING</small>
+      <h1 data-i18n="farmer.tokenTitle">Procurement Token</h1>
+    </div>
+    <div class="card ticketCard">
+      <div id="alert" class="callAlert hidden" role="alert"></div>
+      <div class="tokenLabel" data-i18n="farmer.yourToken">YOUR TOKEN</div>
+      <div id="token" class="token">#—</div>
+      <div class="details">
+        <div><span data-i18n="farmer.farmer">Farmer</span><b>{{ user.name }}</b></div>
+        <div><span data-i18n="farmer.date">Date</span><b id="ticketDate">—</b></div>
+        <div><span data-i18n="farmer.time">Time</span><b id="ticketTime">—</b></div>
+        <div><span data-i18n="farmer.centre">Centre</span><b id="ticketCentre">—</b></div>
+        <div><span data-i18n="farmer.crop">Crop</span><b id="ticketCrop">—</b></div>
+      </div>
+      <div class="queueBox">
+        <small data-i18n="farmer.liveQueue">YOUR LIVE QUEUE</small>
+        <div id="queueText" aria-live="polite">Loading...</div>
+        <div class="queueBar"><i id="queueBarFill"></i></div>
+        <p id="queueHint" data-i18n="farmer.queueHint">We will notify you when the centre calls your token.</p>
+      </div>
+      <div class="statusLine"><span data-i18n="farmer.status">Status</span>: <strong id="status">—</strong></div>
+      <div class="statusMenuCard">
+        <div>
+          <b data-i18n="farmer.myTurn">🔔 My Turn / Status</b>
+          <p id="menuStatus">—</p>
+        </div>
+        <button class="smallBtn" onclick="openStatus()" data-i18n="farmer.checkNow">Check now</button>
+      </div>
+      <div class="notifHeader"><b data-i18n="farmer.notifications">Notifications</b></div>
+      <div id="notifications" class="notifications" aria-live="polite"></div>
+      <div id="cancelArea">
+        <button id="cancelBtn" class="btn ghost" onclick="cancelBooking()" data-i18n="farmer.cancelBooking">Cancel my booking</button>
+        <div id="cancelResult" class="resultBox" role="status"></div>
+      </div>
+      <p class="privacy" data-i18n="farmer.privacy">Only your booking and your notifications are shown here. Other farmers never see your details.</p>
+    </div>
+  </div>
+</main>
+
+<script src="/static/i18n.strings.js"></script>
+<script src="/static/i18n.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let selectedSlotId = null, bookingId = null, refreshTimer = null, notifTimer = null;
+let lastNotificationId = 0, previousStatus = '', latestBooking = null;
+
+/* ---------- small helpers ---------- */
+async function api(url, options) {
+  let res;
+  try {
+    res = await fetch(url, Object.assign({ cache: 'no-store', headers: { 'Content-Type': 'application/json' } }, options || {}));
+  } catch (e) {
+    return { ok: false, status: 0, error: KF.t('err.network') };
+  }
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = null; }
+  if (res.status === 401 || res.status === 403) {
+    return { ok: false, status: res.status, sessionExpired: res.status === 401,
+             error: (data && data.error) || KF.t('err.session') };
+  }
+  if (!res.ok) return { ok: false, status: res.status, error: (data && data.error) || KF.t('err.server') };
+  if (data === null) return { ok: false, status: res.status, error: KF.t('err.response') };
+  return { ok: true, status: res.status, data: data };
+}
+function escapeHtml(text) {
+  return String(text === null || text === undefined ? '' : text)
+    .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function message(boxId, text, kind) {
+  const el = $(boxId);
+  if (el) el.innerHTML = text ? '<div class="' + (kind || 'error') + '">' + escapeHtml(text) + '</div>' : '';
+}
+function statusLabel(status) {
+  const key = { Waiting: 'farmer.waiting', Called: 'farmer.called', Serving: 'farmer.serving',
+                Completed: 'farmer.completed', Cancelled: 'farmer.cancelled' }[status];
+  return key ? KF.t(key) : (status || '—');
+}
+function cropLabel(crop) {
+  const key = { Rice: 'crop.rice', Wheat: 'crop.wheat', Maize: 'crop.maize', Cotton: 'crop.cotton', Other: 'crop.other' }[crop];
+  return key ? KF.t(key) : (crop || '—');
+}
+function aheadText(ahead) {
+  const n = Number(ahead || 0);
+  if (n <= 0) return KF.t('farmer.youAreNext');
+  return n === 1 ? KF.t('farmer.aheadOne') : KF.t('farmer.aheadMany').replace('{n}', n);
+}
+function slotMinutes(value) {
+  const m = /^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i.exec(String(value || '').trim());
+  if (!m) return 0;
+  let hour = parseInt(m[1], 10) % 12;
+  if ((m[3] || '').toUpperCase() === 'PM') hour += 12;
+  return hour * 60 + parseInt(m[2], 10);
+}
+function sortSlots(list) {
+  return list.slice().sort((a, b) => slotMinutes(a.start_time) - slotMinutes(b.start_time));
+}
+function todayISO() {
+  const now = new Date();
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+/* ---------- browser notification support (optional, never required) ---------- */
+async function enableNotifications() {
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) {} }
+}
+function nativeNotify(title, body) {
+  if (window.isSecureContext && 'Notification' in window && Notification.permission === 'granted') {
+    try { new Notification(title, { body: body }); } catch (e) {}
+  }
+}
+/* ---------- booking (FR-04 to FR-08) ---------- */
+async function loadCentres() {
+  const r = await api('/api/centres');
+  if (!r.ok) { message('result', r.error); return; }
+  $('centre').innerHTML = r.data.map((x) => '<option value="' + x.id + '">' + escapeHtml(x.name) + '</option>').join('');
+  await loadSlots();
+}
+async function loadSlots() {
+  selectedSlotId = null;
+  const centre = $('centre'), date = $('date'), slots = $('slots');
+  if (!centre.value || !date.value) { slots.innerHTML = ''; return; }
+  slots.innerHTML = escapeHtml(KF.t('common.loading'));
+  const r = await api('/api/slots?centre_id=' + encodeURIComponent(centre.value) + '&date=' + encodeURIComponent(date.value));
+  if (!r.ok) { slots.innerHTML = ''; message('result', r.error); return; }
+  const list = sortSlots(r.data);
+  if (!list.length) { slots.innerHTML = '<div class="emptySlots">' + escapeHtml(KF.t('farmer.noSlots')) + '</div>'; return; }
+  slots.innerHTML = list.map((x) => {
+    const full = Number(x.booked) >= Number(x.capacity);
+    const left = Math.max(0, Number(x.capacity) - Number(x.booked));
+    return '<button type="button" class="slot ' + (full ? 'fullslot' : '') + '"' + (full ? ' disabled' : '') +
+      ' onclick="selectSlot(' + x.id + ', this)"><span>' + escapeHtml(x.start_time) + ' – ' + escapeHtml(x.end_time) + '</span>' +
+      '<small>' + escapeHtml(full ? KF.t('farmer.full') : KF.t('farmer.slotsLeft').replace('{n}', left)) + '</small></button>';
+  }).join('');
+}
+function selectSlot(id, el) {
+  selectedSlotId = id;
+  document.querySelectorAll('.slot').forEach((x) => x.classList.remove('selected'));
+  el.classList.add('selected');
+}
+async function book() {
+  const btn = $('bookBtn');
+  if (!selectedSlotId) { message('result', KF.t('farmer.chooseSlot')); return; }
+  message('result', '');
+  btn.disabled = true;
+  btn.textContent = KF.t('farmer.bookingNow');          /* blocks duplicate taps */
+  const r = await api('/api/book', { method: 'POST', body: JSON.stringify({ crop: $('crop').value, slot_id: selectedSlotId }) });
+  btn.disabled = false;
+  btn.textContent = KF.t('farmer.book');
+  if (!r.ok) {
+    message('result', r.error);
+    if (r.status === 409 || r.status === 404) loadSlots();
+    return;
+  }
+  bookingId = r.data.booking_id;
+  $('bookingArea').classList.add('hidden');
+  $('ticketArea').classList.remove('hidden');
+  $('token').textContent = '#' + r.data.token;
+  startPolling();
+  await refresh();
+}
+async function cancelBooking() {
+  if (!window.confirm(KF.t('farmer.confirmCancel'))) return;
+  const btn = $('cancelBtn');
+  btn.disabled = true;
+  const r = await api('/api/my-booking/cancel', { method: 'POST' });
+  btn.disabled = false;
+  if (!r.ok) { message('cancelResult', r.error); return; }
+  message('cancelResult', KF.t('farmer.cancelledOk'), 'success');
+  await refresh();
+}
+/* ---------- live queue, polled every 2.5 s (PRD section 13) ---------- */
+function startPolling() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(refresh, 2500);
+}
+async function refresh() {
+  if (!bookingId) {
+    const mine = await api('/api/my-booking');
+    if (!mine.ok) { if (mine.sessionExpired) location.href = '/login'; return; }
+    if (!mine.data || !mine.data.id) return;
+    bookingId = mine.data.id;
+    $('bookingArea').classList.add('hidden');
+    $('ticketArea').classList.remove('hidden');
+    startPolling();
+  }
+  const r = await api('/api/booking/' + bookingId);
+  if (!r.ok) { if (r.sessionExpired) location.href = '/login'; return; }
+  renderTicket(r.data);
+  await loadNotifications(false);
+}
+function renderTicket(item) {
+  latestBooking = item;
+  $('token').textContent = '#' + item.token;
+  $('ticketDate').textContent = item.slot_date || '—';
+  $('ticketTime').textContent = (item.start_time || '') + ' – ' + (item.end_time || '');
+  $('ticketCentre').textContent = item.centre || '—';
+  $('ticketCrop').textContent = cropLabel(item.crop);
+  $('status').textContent = statusLabel(item.status);
+  if (item.status !== previousStatus && (item.status === 'Called' || item.status === 'Serving')) {
+    const key = item.status === 'Called' ? 'farmer.notifCall' : 'farmer.notifServe';
+    nativeNotify('KisanFlow', KF.t(key).replace('{token}', item.token));
+    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+  }
+  previousStatus = item.status;
+  const alert = $('alert'), queueText = $('queueText'), fill = $('queueBarFill'), hint = $('queueHint');
+  const tokenLine = '<br><span class="alertToken">' + escapeHtml(KF.t('farmer.yourToken')) + ': #' + escapeHtml(item.token) + '</span>';
+  if (item.status === 'Called') {
+    alert.classList.remove('hidden');
+    alert.innerHTML = '🔔 <b>' + escapeHtml(KF.t('farmer.beingCalled')) + '</b><br>' + escapeHtml(KF.t('farmer.goToCounter')) + tokenLine;
+    queueText.textContent = KF.t('farmer.yourTurn');
+    fill.style.width = '100%';
+    hint.textContent = KF.t('farmer.goToCounter');
+  } else if (item.status === 'Serving') {
+    alert.classList.remove('hidden');
+    alert.innerHTML = '🔔 <b>' + escapeHtml(KF.t('farmer.beingServed')) + '</b><br>' + escapeHtml(KF.t('farmer.goToCounterShort')) + tokenLine;
+    queueText.textContent = KF.t('farmer.nowServing');
+    fill.style.width = '100%';
+    hint.textContent = KF.t('farmer.goToCounterShort');
+  } else if (item.status === 'Completed') {
+    alert.classList.add('hidden');
+    queueText.textContent = KF.t('farmer.completed');
+    fill.style.width = '100%';
+    hint.textContent = '';
+  } else if (item.status === 'Cancelled') {
+    alert.classList.add('hidden');
+    queueText.textContent = KF.t('farmer.cancelled');
+    fill.style.width = '0';
+    hint.textContent = '';
+  } else {
+    alert.classList.add('hidden');
+    queueText.textContent = aheadText(item.ahead);
+    fill.style.width = Math.max(8, Math.min(100, 100 / (Number(item.ahead || 0) + 1))) + '%';
+    hint.textContent = KF.t('farmer.queueHint');
+  }
+  const cancelBtn = $('cancelBtn');
+  if (cancelBtn) {
+    cancelBtn.classList.toggle('hidden', item.status !== 'Waiting');
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = KF.t('farmer.cancelBooking');
+  }
+  updateStatusMenu();
+}
+/* ---------- notifications: history + targeted call alert (FR-13, FR-14) ---------- */
+async function loadNotifications(markRead) {
+  const r = await api('/api/notifications');
+  if (!r.ok) return;
+  const notes = r.data || [];
+  renderNotifications(notes);
+  const unread = notes.filter((n) => Number(n.is_read) === 0);
+  if (unread.length && Number(unread[0].id) !== lastNotificationId) {
+    lastNotificationId = Number(unread[0].id);
+    nativeNotify('KisanFlow', KF.notificationText(unread[0]));
+    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+  }
+  if (markRead && notes.length) {
+    await api('/api/notifications/read', { method: 'POST' });
+    lastNotificationId = Number(notes[0].id);
+    renderNotifications(notes.map((n) => Object.assign({}, n, { is_read: 1 })));
+  }
+}
+function renderNotifications(notes) {
+  const box = $('notifications');
+  if (!box) return;
+  if (!notes.length) {
+    box.innerHTML = '<div class="noticeEmpty">' + escapeHtml(KF.t('farmer.noNotifications')) + '</div>';
+    return;
+  }
+  box.innerHTML = notes.map((n) => {
+    const unread = Number(n.is_read) === 0;
+    return '<div class="notice ' + (unread ? 'unread' : 'noticeRead') + '">🔔 ' + escapeHtml(KF.notificationText(n)) +
+      '<small>' + escapeHtml(n.created_at || '') + '</small></div>';
+  }).join('');
+}
+
+/* ---------- My Turn / Status menu (PRD section 14) ---------- */
+function openStatus() {
+  const el = $('turnToast');
+  el.classList.remove('hidden');
+  el.innerHTML = '<div class="turnToastInner"><button class="closeToast" aria-label="Close" onclick="closeStatus()">×</button>' +
+    '<b>' + escapeHtml(KF.t('farmer.statusCardTitle')) + '</b>' +
+    '<div id="toastStatus">' + escapeHtml(KF.t('farmer.checking')) + '</div>' +
+    '<div id="toastQueue"></div><div id="toastAction">' + escapeHtml(KF.t('farmer.keepOpen')) + '</div></div>';
+  refresh().then(() => updateStatusMenu());
+  loadNotifications(true);        /* opening My Turn counts as reading the notifications */
+}
+function closeStatus() { $('turnToast').classList.add('hidden'); }
+function updateStatusMenu() {
+  const menu = $('menuStatus');
+  if (menu) {
+    const item = latestBooking;
+    if (!item) menu.textContent = KF.t('farmer.noBooking');
+    else if (item.status === 'Called') menu.textContent = '🔔 ' + KF.t('farmer.beingCalled');
+    else if (item.status === 'Serving') menu.textContent = '🟢 ' + KF.t('farmer.beingServed');
+    else menu.textContent = KF.t('farmer.status') + ': ' + statusLabel(item.status) + ' — ' + aheadText(item.ahead);
+  }
+  const ts = $('toastStatus'), tq = $('toastQueue');
+  if (ts && latestBooking) {
+    ts.innerHTML = '<strong>' + escapeHtml(KF.t('farmer.status')) + ': ' + escapeHtml(statusLabel(latestBooking.status)) + '</strong>';
+    tq.textContent = aheadText(latestBooking.ahead);
+  }
+}
+async function logout() { await api('/api/logout', { method: 'POST' }); location.href = '/'; }
+
+/* ---------- boot ---------- */
+if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/static/sw.js').catch(() => {}); }
+KF.onChange(() => {                 /* re-render dynamic text after a language switch */
+  if (latestBooking) renderTicket(latestBooking);
+  else updateStatusMenu();
+  loadSlots();
+});
+const dateInput = $('date');
+dateInput.value = todayISO();
+$('centre').addEventListener('change', loadSlots);
+dateInput.addEventListener('change', loadSlots);
+enableNotifications();
+loadCentres().then(refresh);
+loadNotifications(false);
+notifTimer = setInterval(() => loadNotifications(false), 4000);
+window.addEventListener('beforeunload', () => {
+  if (refreshTimer) clearInterval(refreshTimer);
+  if (notifTimer) clearInterval(notifTimer);
+});
+
+
+
+
+</script>
+</body>
+</html>

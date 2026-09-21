@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Register | KisanFlow</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <a class="logo" href="/">🌾 KisanFlow</a>
+  <div id="langSwitcher" class="langSwitcher" role="group" aria-label="Language"></div>
+</header>
+<main class="page">
+  <div class="title">
+    <small data-i18n="register.small">FARMER ACCOUNT</small>
+    <h1 data-i18n="register.title">Create your account</h1>
+    <p data-i18n="register.subtitle">Your account keeps your booking and notifications private.</p>
+  </div>
+  <div class="card form">
+    <label>
+      <span data-i18n="register.name">Farmer name</span>
+      <input id="name" autocomplete="name" data-i18n-placeholder="register.namePh" placeholder="Enter your name">
+    </label>
+    <label>
+      <span data-i18n="register.phone">Mobile number</span>
+      <input id="phone" inputmode="numeric" autocomplete="tel" data-i18n-placeholder="register.phonePh" placeholder="10-digit mobile number">
+    </label>
+    <label>
+      <span data-i18n="register.password">Password</span>
+      <input id="password" type="password" autocomplete="new-password" data-i18n-placeholder="register.passwordPh" placeholder="At least 6 characters">
+    </label>
+    <label>
+      <span data-i18n="register.confirm">Confirm password</span>
+      <input id="confirm" type="password" autocomplete="new-password" data-i18n-placeholder="register.confirmPh" placeholder="Repeat your password">
+    </label>
+    <button id="registerBtn" class="btn wide" onclick="doRegister()" data-i18n="register.button">Create account</button>
+    <div id="result" class="resultBox" role="status"></div>
+    <p class="privacy"><span data-i18n="register.haveAccount">Already registered?</span> <a href="/login" data-i18n="common.login">Login</a></p>
+  </div>
+</main>
+<script src="/static/i18n.strings.js"></script>
+<script src="/static/i18n.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function doRegister() {
+  const btn = $('registerBtn');
+  const box = $('result');
+  if ($('password').value !== $('confirm').value) {
+    box.innerHTML = '<div class="error">' + KF.escape(KF.t('register.mismatch')) + '</div>';
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = KF.t('common.working');
+  let res = null, data = null;
+  try {
+    res = await fetch('/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: $('name').value.trim(), phone: $('phone').value.trim(), password: $('password').value })
+    });
+  } catch (e) {
+    res = null;
+  }
+  if (!res) {
+    box.innerHTML = '<div class="error">' + KF.escape(KF.t('err.network')) + '</div>';
+    btn.disabled = false;
+    btn.textContent = KF.t('register.button');
+    return;
+  }
+  try { data = await res.json(); } catch (e) { data = null; }
+  btn.disabled = false;
+  btn.textContent = KF.t('register.button');
+  if (res.ok && data && data.redirect) {
+    box.innerHTML = '<div class="success">' + KF.escape(KF.t('register.created')) + '</div>';
+    location.href = data.redirect;
+    return;
+  }
+  box.innerHTML = '<div class="error">' + KF.escape((data && data.error) || KF.t('err.server')) + '</div>';
+}
+
+$('confirm').addEventListener('keydown', (e) => { if (e.key === 'Enter') doRegister(); });
+</script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+KISANFLOW v13 - WHAT CHANGED IN THIS UPGRADE
+============================================
+
+Stack is unchanged: HTML + CSS + vanilla JavaScript templates served by a Flask
+JSON API, SQLAlchemy with SQLite locally and PostgreSQL in production.
+
+BACKEND (app.py)
+1. Overbooking is now impossible (PRD FR-06 / section 31).
+   - The capacity check and the INSERT happen in ONE conditional statement:
+     INSERT ... SELECT ... WHERE (SELECT COUNT(*) FROM bookings WHERE slot_id=... AND
+     status IN ('Waiting','Called','Serving')) < capacity RETURNING id, token
+   - PostgreSQL additionally takes SELECT ... FOR UPDATE on the slot row; the local
+     SQLite prototype serialises bookings with one in-process lock.
+   - Token allocation (COALESCE(MAX(token),0)+1) happens in the same statement, so two
+     farmers can never receive the same token.
+2. Bug fixed: POST /api/call/<id> used to silently mark ANOTHER farmer's Serving
+   booking as Completed. Calling a farmer now only touches that farmer.
+3. Status machine (PRD section 10) with validated transitions:
+   Waiting -> Called/Serving/Cancelled, Called -> Serving/Waiting/Cancelled,
+   Serving -> Completed/Cancelled, Completed terminal, Cancelled -> Waiting.
+   Repeating the same action is an idempotent no-op (no notification spam).
+4. New/changed endpoints:
+   POST /api/call/<id>      Waiting -> Called + targeted notification
+   POST /api/serve/<id>     Called  -> Serving
+   POST /api/complete/<id>  Serving -> Completed
+   POST /api/cancel/<id>    admin cancellation (no-show)
+   POST /api/my-booking/cancel   farmer cancels their own waiting booking
+   POST /api/advance        complete current Serving, then call next Waiting
+   GET  /api/bookings?date=&centre_id=&status=   admin filters (defaults unchanged)
+   GET  /api/stats          + called, cancelled, slots_total, slots_available, slots_full
+   GET  /api/slots          + remaining per slot (active bookings only)
+   GET  /api/my-notifications, POST /api/notifications/<id>/read
+   POST /api/register, POST /api/login, POST /api/logout  (PRD-compatible aliases)
+   GET  /health             {status:"ok", database:"connected", engine:"sqlite"|"postgresql"}
+5. Cancelled/completed bookings no longer consume slot capacity.
+6. Validation added: past date booking rejected, past date slot creation rejected,
+   capacity 1..200, interval whitelist, start < end, unknown centre 404, invalid date
+   filter 400, crop required, session/role checks on every protected route.
+7. Security: Origin check on POST/PUT/PATCH/DELETE, login/registration throttling (429),
+   security headers, JSON error envelope for every API failure, no tracebacks leaked,
+   no password hashes in any response, SQLite WAL + busy timeout, additive-only indexes.
+8. Removed the fake "payment_status = Payment processing" write on completion; payments
+   are out of MVP scope.
+
+DATABASE
+- No destructive migration. Only CREATE INDEX IF NOT EXISTS was added, so the existing
+  procurement.db (users, centres, slots, bookings, notifications) keeps working.
+
+FRONTEND (HTML + CSS + vanilla JS)
+- static/i18n.strings.js + static/i18n.js: English / Telugu / Hindi dictionary, a
+  data-i18n markup applier, a language switcher (EN | Telugu | Hindi) stored in
+  localStorage, and localised notification text.
+- farmer.html: complete rewrite of the same screens with i18n, a fixed
+  "Token #undefined" alert bug, notification history with read/unread state,
+  a cancel-booking action, a single fetch wrapper that handles network/HTTP/JSON/session
+  errors, loading + disabled button states, and slots sorted by real time.
+- dashboard.html: Total/Waiting/Called/Serving/Completed/Cancelled counters, slot
+  capacity summary, centre/date/status filters, status-aware actions
+  (CALL FARMER / START SERVING / MARK COMPLETE) and a "Next in queue" button.
+- admin.html: clearer slot list with remaining capacity and FULL badges, client-side
+  validation feedback.
+- index/login/register: language switcher + translatable labels, safe error handling.
+- style.css: v13 component styles appended (language switcher, filters, status pills,
+  notification states, 44 px touch targets, visible focus rings).
+- _v12_backup/ holds the previous templates and stylesheet for reference.
+
+TESTS
+- tests/test_workflows.py: 102 offline end-to-end checks against a temporary SQLite
+  database (registration, login, slots, capacity, tokens, queue isolation, targeted
+  call notification, status machine, authorisation, cancellation, past dates, origin
+  guard, throttling, filters, 5-thread concurrency, rendered pages/i18n assets).
+  Run: .\venv\Scripts\python.exe tests\test_workflows.py

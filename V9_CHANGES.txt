@@ -1,0 +1,23 @@
+KisanFlow v9 - Admin Login Fix
+
+Main fix:
+- /admin now ALWAYS opens the Admin Login page unless an admin is already logged in.
+- A farmer session no longer redirects /admin to the home page.
+- /admin/login accepts only the admin username and password and clears any existing farmer session.
+- After admin login, /admin opens the slot-management page.
+- /dashboard redirects to /admin when an admin session is missing.
+- Slot page now previews the slots created for the selected centre/date.
+
+Demo admin:
+Username: admin@kisanflow.com
+Password: Admin@123
+
+Local test:
+1. Stop old server with Ctrl+C.
+2. Open this v9 folder in VS Code.
+3. Run: .\\venv\\Scripts\\python.exe -m pip install -r requirements.txt
+4. Run: .\\venv\\Scripts\\python.exe app.py
+5. Open http://127.0.0.1:5000/admin
+6. Login with the demo admin.
+7. Create slots.
+8. In a separate browser/tab, use the farmer account.

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin | KisanFlow</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <a class="logo" href="/">🌾 KisanFlow</a>
+  <nav>
+    <a href="/dashboard">Dashboard</a>
+    <button class="linkBtn" onclick="logout()">Logout</button>
+  </nav>
+</header>
+<main class="page">
+  <div class="title">
+    <small>ADMIN / CENTRE SETUP</small>
+    <h1>Create daily slots</h1>
+    <p>Set the capacity and working hours. Once a slot is full it is no longer offered to farmers.</p>
+  </div>
+  <div class="card form">
+    <label>Centre
+      <select id="centre"></select>
+    </label>
+    <label>Date
+      <input id="date" type="date">
+    </label>
+    <label>Capacity per slot
+      <input id="capacity" type="number" value="10" min="1" max="200">
+    </label>
+    <label>Start time
+      <input id="start" type="time" value="09:00">
+    </label>
+    <label>End time
+      <input id="end" type="time" value="17:00">
+    </label>
+    <label>Slot length
+      <select id="interval">
+        <option value="30">30 minutes</option>
+        <option value="60" selected>60 minutes</option>
+        <option value="120">2 hours</option>
+      </select>
+    </label>
+    <button id="generateBtn" class="btn wide" onclick="generate()">Generate slots</button>
+    <div id="result" class="resultBox" role="status"></div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h2>Slots for the selected centre and date</h2>
+    <div id="slotRows" class="slotRows">—</div>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function api(url, options) {
+  let res;
+  try {
+    res = await fetch(url, Object.assign({ cache: 'no-store', headers: { 'Content-Type': 'application/json' } }, options || {}));
+  } catch (e) {
+    return { ok: false, status: 0, error: 'Unable to connect to the server. Please try again.' };
+  }
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = null; }
+  if (res.status === 401) { location.href = '/admin'; return { ok: false, status: 401, error: 'Admin session expired.' }; }
+  if (!res.ok) return { ok: false, status: res.status, error: (data && data.error) || 'Server error. Please try again.' };
+  return { ok: true, status: res.status, data: data };
+}
+function escapeHtml(text) {
+  return String(text === null || text === undefined ? '' : text)
+    .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function show(text, kind) {
+  $('result').innerHTML = text ? '<div class="' + (kind || 'error') + '">' + escapeHtml(text) + '</div>' : '';
+}
+function slotMinutes(value) {
+  const m = /^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i.exec(String(value || '').trim());
+  if (!m) return 0;
+  let hour = parseInt(m[1], 10) % 12;
+  if ((m[3] || '').toUpperCase() === 'PM') hour += 12;
+  return hour * 60 + parseInt(m[2], 10);
+}
+
+async function load() {
+  const r = await api('/api/centres');
+  if (!r.ok) { show(r.error); return; }
+  $('centre').innerHTML = r.data.map((x) => '<option value="' + x.id + '">' + escapeHtml(x.name) + '</option>').join('');
+  const now = new Date();
+  $('date').value = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  await loadSlots();
+}
+
+async function generate() {
+  const btn = $('generateBtn');
+  const capacity = Number($('capacity').value);
+  if (!(capacity >= 1 && capacity <= 200)) { show('Capacity must be between 1 and 200 farmers.'); return; }
+  if (!$('date').value) { show('Choose the date for these slots.'); return; }
+  if ($('start').value >= $('end').value) { show('End time must be after start time.'); return; }
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+  const r = await api('/api/generate-slots', {
+    method: 'POST',
+    body: JSON.stringify({
+      centre_id: Number($('centre').value),
+      date: $('date').value,
+      capacity: capacity,
+      start: $('start').value,
+      end: $('end').value,
+      interval: Number($('interval').value)
+    })
+  });
+  btn.disabled = false;
+  btn.textContent = 'Generate slots';
+  if (!r.ok) { show(r.error); return; }
+  show(r.data.created ? ('Created ' + r.data.created + ' new slot(s).') : 'Those slots already exist.', 'success');
+  await loadSlots();
+}
+
+async function loadSlots() {
+  const centre = $('centre').value, date = $('date').value;
+  if (!centre || !date) { $('slotRows').innerHTML = '—'; return; }
+  $('slotRows').innerHTML = 'Loading…';
+  const r = await api('/api/slots?centre_id=' + encodeURIComponent(centre) + '&date=' + encodeURIComponent(date));
+  if (!r.ok) { $('slotRows').innerHTML = ''; show(r.error); return; }
+  const slots = (r.data || []).slice().sort((a, b) => slotMinutes(a.start_time) - slotMinutes(b.start_time));
+  if (!slots.length) { $('slotRows').innerHTML = '<p class="emptySlots">No slots for this date yet.</p>'; return; }
+  $('slotRows').innerHTML = slots.map((x) => {
+    const full = Number(x.booked) >= Number(x.capacity);
+    return '<div class="slotRow"><b>' + escapeHtml(x.start_time) + ' – ' + escapeHtml(x.end_time) + '</b>' +
+      '<span>' + escapeHtml(x.booked) + '/' + escapeHtml(x.capacity) + ' booked</span>' +
+      '<span class="pill ' + (full ? 'pill-cancelled' : 'pill-serving') + '">' + (full ? 'FULL' : (Math.max(0, Number(x.capacity) - Number(x.booked))) + ' LEFT') + '</span></div>';
+  }).join('');
+}
+
+async function logout() {
+  await api('/logout', { method: 'POST' });
+  location.href = '/';
+}
+
+$('centre').addEventListener('change', loadSlots);
+$('date').addEventListener('change', loadSlots);
+load();
+</script>
+</body>
+</html>

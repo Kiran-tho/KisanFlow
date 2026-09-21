@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login | KisanFlow</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <a class="logo" href="/">🌾 KisanFlow</a>
+  <div id="langSwitcher" class="langSwitcher" role="group" aria-label="Language"></div>
+</header>
+<main class="page">
+  <div class="title">
+    <small data-i18n="login.small">SECURE LOGIN</small>
+    <h1 data-i18n="login.title">Welcome back</h1>
+    <p data-i18n="login.subtitle">Farmers and centre administrators use separate accounts.</p>
+  </div>
+  <div class="card form">
+    <label>
+      <span data-i18n="login.identifier">Mobile number / Admin username</span>
+      <input id="identifier" autocomplete="username" data-i18n-placeholder="login.identifierPh" placeholder="10-digit mobile or admin@kisanflow.com">
+    </label>
+    <label>
+      <span data-i18n="login.password">Password</span>
+      <input id="password" type="password" autocomplete="current-password" data-i18n-placeholder="login.passwordPh" placeholder="Your password">
+    </label>
+    <button id="loginBtn" class="btn wide" onclick="doLogin()" data-i18n="login.button">Login</button>
+    <div id="result" class="resultBox" role="status"></div>
+    <p class="privacy"><span data-i18n="login.newFarmer">New farmer?</span> <a href="/register" data-i18n="login.createAccount">Create a farmer account</a></p>
+    <p class="privacy"><span data-i18n="login.demoAdmin">Demo admin</span>: <b>admin@kisanflow.com</b> / <b>Admin@123</b></p>
+  </div>
+</main>
+<script src="/static/i18n.strings.js"></script>
+<script src="/static/i18n.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function doLogin() {
+  const btn = $('loginBtn');
+  const box = $('result');
+  btn.disabled = true;
+  btn.textContent = KF.t('common.working');
+  let res = null, data = null;
+  try {
+    res = await fetch('/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier: $('identifier').value.trim(), password: $('password').value })
+    });
+  } catch (e) {
+    res = null;
+  }
+  if (!res) {
+    box.innerHTML = '<div class="error">' + KF.escape(KF.t('err.network')) + '</div>';
+    btn.disabled = false;
+    btn.textContent = KF.t('login.button');
+    return;
+  }
+  try { data = await res.json(); } catch (e) { data = null; }
+  btn.disabled = false;
+  btn.textContent = KF.t('login.button');
+  if (res.ok && data && data.redirect) {
+    box.innerHTML = '<div class="success">' + KF.escape(KF.t('login.success')) + '</div>';
+    location.href = data.redirect;
+    return;
+  }
+  box.innerHTML = '<div class="error">' + KF.escape((data && data.error) || KF.t('login.failed')) + '</div>';
+}
+
+$('password').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+$('identifier').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('password').focus(); });
+</script>
+</body>
+</html>

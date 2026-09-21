@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Centre Dashboard | KisanFlow</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <a class="logo" href="/">🌾 KisanFlow</a>
+  <span class="farmerBadge">ADMIN • {{ user.name }}</span>
+  <nav>
+    <a href="/admin">Slots</a>
+    <button class="linkBtn" onclick="logout()">Logout</button>
+  </nav>
+</header>
+<main class="widepage">
+  <div class="top">
+    <div>
+      <small>INTERNAL • PROCUREMENT CENTRE</small>
+      <h1>Live Queue Control</h1>
+    </div>
+    <button id="nextBtn" class="btn" onclick="advanceQueue()">Next in queue →</button>
+  </div>
+
+  <div id="banner" class="resultBox" role="status"></div>
+
+  <div class="stats">
+    <div class="card"><small>Total bookings</small><b id="total">0</b></div>
+    <div class="card"><small>Waiting</small><b id="waiting">0</b></div>
+    <div class="card"><small>Called</small><b id="called">0</b></div>
+    <div class="card"><small>Serving</small><b id="serving">0</b></div>
+    <div class="card"><small>Completed</small><b id="completed">0</b></div>
+    <div class="card"><small>Cancelled</small><b id="cancelled">0</b></div>
+  </div>
+
+  <div class="card slotSummary" id="slotSummary">Slot capacity: —</div>
+
+  <div class="now card">
+    <small>NOW CALLED / SERVING</small>
+    <div id="now">—</div>
+  </div>
+
+  <div class="card filters">
+    <label>Centre
+      <select id="filterCentre"><option value="">All centres</option></select>
+    </label>
+    <label>Date
+      <input id="filterDate" type="date">
+    </label>
+    <label>Status
+      <select id="filterStatus">
+        <option value="">All statuses</option>
+        <option>Waiting</option>
+        <option>Called</option>
+        <option>Serving</option>
+        <option>Completed</option>
+        <option>Cancelled</option>
+      </select>
+    </label>
+    <button class="smallBtn ghostBtn" onclick="clearFilters()">Clear filters</button>
+  </div>
+
+  <div class="card tablewrap">
+    <h2>Farmers &amp; Queue</h2>
+    <table>
+      <thead>
+        <tr><th>Token</th><th>Farmer</th><th>Crop</th><th>Slot</th><th>Status</th><th>Action</th></tr>
+      </thead>
+      <tbody id="rows">
+        <tr><td colspan="6" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const STAT_KEYS = ['total', 'waiting', 'called', 'serving', 'completed', 'cancelled'];
+let refreshing = false;
+
+async function api(url, options) {
+  let res;
+  try {
+    res = await fetch(url, Object.assign({ cache: 'no-store', headers: { 'Content-Type': 'application/json' } }, options || {}));
+  } catch (e) {
+    return { ok: false, status: 0, error: 'Unable to connect to the server. Please try again.' };
+  }
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = null; }
+  if (res.status === 401) return { ok: false, status: 401, sessionExpired: true, error: 'Admin session expired.' };
+  if (!res.ok) return { ok: false, status: res.status, error: (data && data.error) || 'Server error. Please try again.' };
+  return { ok: true, status: res.status, data: data };
+}
+function escapeHtml(text) {
+  return String(text === null || text === undefined ? '' : text)
+    .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function banner(text, kind) {
+  $('banner').innerHTML = text ? '<div class="' + (kind || 'error') + '">' + escapeHtml(text) + '</div>' : '';
+}
+function pill(status) {
+  return '<span class="pill pill-' + String(status || '').toLowerCase() + '">' + escapeHtml(status) + '</span>';
+}
+function actionCell(row) {
+  if (row.status === 'Waiting') return '<button class="smallBtn" onclick="doAction(\'call\',' + row.id + ')">CALL FARMER</button>';
+  if (row.status === 'Called') return '<button class="smallBtn" onclick="doAction(\'serve\',' + row.id + ')">START SERVING</button>';
+  if (row.status === 'Serving') return '<button class="smallBtn" onclick="doAction(\'complete\',' + row.id + ')">MARK COMPLETE</button>';
+  return '—';
+}
+
+async function loadCentres() {
+  const r = await api('/api/centres');
+  if (!r.ok) { banner(r.error); return; }
+  const options = r.data.map((c) => '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>').join('');
+  $('filterCentre').innerHTML = '<option value="">All centres</option>' + options;
+}
+
+async function loadStats() {
+  const r = await api('/api/stats');
+  if (!r.ok) { banner(r.error); return false; }
+  STAT_KEYS.forEach((key) => { const el = $(key); if (el) el.textContent = r.data[key] || 0; });
+  $('slotSummary').textContent = 'Slot capacity for today onwards: ' + (r.data.slots_available || 0) + ' available • ' +
+    (r.data.slots_full || 0) + ' full • ' + (r.data.slots_total || 0) + ' slots';
+  return true;
+}
+
+async function loadBookings() {
+  const params = new URLSearchParams();
+  if ($('filterCentre').value) params.set('centre_id', $('filterCentre').value);
+  if ($('filterDate').value) params.set('date', $('filterDate').value);
+  if ($('filterStatus').value) params.set('status', $('filterStatus').value);
+  const query = params.toString();
+  const r = await api('/api/bookings' + (query ? '?' + query : ''));
+  if (!r.ok) { banner(r.error); return; }
+  const rows = r.data || [];
+  const now = rows.find((x) => x.status === 'Called' || x.status === 'Serving');
+  $('now').textContent = now ? ('#' + now.token + ' • ' + now.name + ' • ' + now.status + ' • ' + now.centre) : '—';
+  $('rows').innerHTML = rows.length ? rows.map((x) => '<tr>' +
+      '<td><b>#' + escapeHtml(x.token) + '</b></td>' +
+      '<td>' + escapeHtml(x.name) + '<small>' + escapeHtml(x.phone) + '</small></td>' +
+      '<td>' + escapeHtml(x.crop) + '</td>' +
+      '<td>' + escapeHtml(x.slot_date) + '<br>' + escapeHtml(x.start_time) + '–' + escapeHtml(x.end_time) +
+        '<small>' + escapeHtml(x.centre) + ' • ' + escapeHtml(Math.max(0, Number(x.remaining || 0))) + ' left</small></td>' +
+      '<td>' + pill(x.status) + '</td>' +
+      '<td>' + actionCell(x) + '</td></tr>').join('')
+    : '<tr><td colspan="6" class="empty">No bookings match these filters.</td></tr>';
+}
+
+async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    const ok = await loadStats();
+    if (!ok && $('rows').innerHTML.indexOf('session expired') === -1) { /* banner already shown */ }
+    await loadBookings();
+  } finally {
+    refreshing = false;
+  }
+}
+
+async function doAction(action, id) {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    const r = await api('/api/' + action + '/' + id, { method: 'POST' });
+    if (!r.ok) banner(r.error);
+    else banner('Token #' + (r.data.booking ? r.data.booking.token : id) + ' → ' + (r.data.status || action) + '. The farmer was notified.', 'success');
+  } finally {
+    refreshing = false;
+  }
+  await refresh();
+}
+
+async function advanceQueue() {
+  if (refreshing) return;
+  const btn = $('nextBtn');
+  btn.disabled = true;
+  refreshing = true;
+  try {
+    const r = await api('/api/advance', { method: 'POST' });
+    if (!r.ok) banner(r.error);
+    else if (!r.data.called && !r.data.completed) banner('Nobody is waiting in the queue right now.', 'success');
+    else banner('Completed booking ' + (r.data.completed || '—') + ', called booking ' + (r.data.called || '—') + '.', 'success');
+  } finally {
+    refreshing = false;
+    btn.disabled = false;
+  }
+  await refresh();
+}
+
+function clearFilters() {
+  $('filterCentre').value = '';
+  $('filterDate').value = '';
+  $('filterStatus').value = '';
+  refresh();
+}
+
+async function logout() {
+  await api('/logout', { method: 'POST' });
+  location.href = '/';
+}
+
+['filterCentre', 'filterDate', 'filterStatus'].forEach((id) => {
+  $(id).addEventListener('change', () => { if (id === 'filterStatus' || true) refresh(); });
+});
+loadCentres().then(refresh);
+setInterval(refresh, 3000);
+window.addEventListener('beforeunload', () => { refreshing = false; });
+
+</script>
+</body>
+</html>

@@ -59,6 +59,14 @@
         <option>Cancelled</option>
       </select>
     </label>
+    <label>Tier
+      <select id="filterTier">
+        <option value="">All tiers</option>
+        <option>High</option>
+        <option>Mid</option>
+        <option>Low</option>
+      </select>
+    </label>
     <button class="smallBtn ghostBtn" onclick="clearFilters()">Clear filters</button>
   </div>
 
@@ -66,10 +74,10 @@
     <h2>Farmers &amp; Queue</h2>
     <table>
       <thead>
-        <tr><th>Token</th><th>Farmer</th><th>Crop</th><th>Slot</th><th>Status</th><th>Action</th></tr>
+        <tr><th>Token</th><th>Farmer</th><th>Crop</th><th>Qty / Tier</th><th>Slot</th><th>Status</th><th>Action</th></tr>
       </thead>
       <tbody id="rows">
-        <tr><td colspan="6" class="empty">Loading…</td></tr>
+        <tr><td colspan="7" class="empty">Loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -130,6 +138,7 @@ async function loadBookings() {
   if ($('filterCentre').value) params.set('centre_id', $('filterCentre').value);
   if ($('filterDate').value) params.set('date', $('filterDate').value);
   if ($('filterStatus').value) params.set('status', $('filterStatus').value);
+  if ($('filterTier').value) params.set('tier', $('filterTier').value);
   const query = params.toString();
   const r = await api('/api/bookings' + (query ? '?' + query : ''));
   if (!r.ok) { banner(r.error); return; }
@@ -140,11 +149,12 @@ async function loadBookings() {
       '<td><b>#' + escapeHtml(x.token) + '</b></td>' +
       '<td>' + escapeHtml(x.name) + '<small>' + escapeHtml(x.phone) + '</small></td>' +
       '<td>' + escapeHtml(x.crop) + '</td>' +
+      '<td>' + escapeHtml((x.quantity_tons !== null && x.quantity_tons !== undefined ? x.quantity_tons + ' t' : '—')) + '<small>' + escapeHtml(x.tier || '') + '</small></td>' +
       '<td>' + escapeHtml(x.slot_date) + '<br>' + escapeHtml(x.start_time) + '–' + escapeHtml(x.end_time) +
         '<small>' + escapeHtml(x.centre) + ' • ' + escapeHtml(Math.max(0, Number(x.remaining || 0))) + ' left</small></td>' +
       '<td>' + pill(x.status) + '</td>' +
       '<td>' + actionCell(x) + '</td></tr>').join('')
-    : '<tr><td colspan="6" class="empty">No bookings match these filters.</td></tr>';
+    : '<tr><td colspan="7" class="empty">No bookings match these filters.</td></tr>';
 }
 
 async function refresh() {
@@ -193,6 +203,7 @@ function clearFilters() {
   $('filterCentre').value = '';
   $('filterDate').value = '';
   $('filterStatus').value = '';
+  $('filterTier').value = '';
   refresh();
 }
 

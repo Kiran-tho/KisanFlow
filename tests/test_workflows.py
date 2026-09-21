@@ -71,12 +71,19 @@ def past(days=1):
     return (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
 
 
-def make_slot(centre_id, slot_date, start='09:00 AM', end='10:00 AM', capacity=2):
-    """Insert a slot directly so capacity assertions are exact and isolated."""
+def make_slot(centre_id, slot_date, start='09:00 AM', end='10:00 AM', capacity=2, quotas=None):
+    """Insert a slot directly so capacity assertions are exact and isolated.
+
+    quotas = (high, mid, low) seats; default splits capacity 50/30/remainder.
+    """
+    if quotas is None:
+        qh, qm = (capacity * 50) // 100, (capacity * 30) // 100
+        quotas = (qh, qm, capacity - qh - qm)
     with kf.engine.begin() as c:
-        new_id = c.execute(kf.text('''INSERT INTO slots(centre_id,slot_date,start_time,end_time,capacity)
-            VALUES(:cid,:d,:s,:e,:cap) RETURNING id'''),
-            {'cid': centre_id, 'd': slot_date, 's': start, 'e': end, 'cap': capacity}).scalar_one()
+        new_id = c.execute(kf.text('''INSERT INTO slots(centre_id,slot_date,start_time,end_time,capacity,cap_high,cap_mid,cap_low)
+            VALUES(:cid,:d,:s,:e,:cap,:qh,:qm,:ql) RETURNING id'''),
+            {'cid': centre_id, 'd': slot_date, 's': start, 'e': end, 'cap': capacity,
+             'qh': quotas[0], 'qm': quotas[1], 'ql': quotas[2]}).scalar_one()
     return int(new_id)
 
 
@@ -135,7 +142,9 @@ def test_health_pages_and_auth():
     S['admin'] = admin
     day5 = future(5)
     S['day5'] = day5
-    payload = {'centre_id': centre['id'], 'date': day5, 'capacity': 3, 'start': '09:00', 'end': '11:00', 'interval': 60}
+    payload = {'centre_id': centre['id'], 'date': day5, 'capacity': 10,
+               'cap_high': 5, 'cap_mid': 3, 'cap_low': 2,
+               'start': '09:00', 'end': '11:00', 'interval': 60}
     r = admin.post('/api/generate-slots', json=payload)
     check('admin creates two hourly slots', r.status_code == 200 and (r.get_json() or {}).get('created') == 2, r.get_json())
     r = admin.post('/api/generate-slots', json=payload)
@@ -143,69 +152,110 @@ def test_health_pages_and_auth():
     check('past date slot creation rejected (400)',
           admin.post('/api/generate-slots', json=dict(payload, date=past(2))).status_code == 400)
     check('capacity 0 rejected (400)', admin.post('/api/generate-slots', json=dict(payload, capacity=0)).status_code == 400)
+    check('tier seats must sum to capacity (400)',
+          admin.post('/api/generate-slots', json=dict(payload, cap_high=9, cap_mid=3, cap_low=2)).status_code == 400)
+    check('negative tier seats rejected (400)',
+          admin.post('/api/generate-slots', json=dict(payload, cap_high=-1)).status_code == 400)
     check('end before start rejected (400)', admin.post('/api/generate-slots', json=dict(payload, start='11:00', end='09:00')).status_code == 400)
     check('unknown centre rejected (404)', admin.post('/api/generate-slots', json=dict(payload, centre_id=99999)).status_code == 404)
     check('non-admin cannot create slots (403)', farmer_a.post('/api/generate-slots', json=payload).status_code == 403)
     r = farmer_a.get('/api/slots?centre_id=%s&date=%s' % (centre['id'], day5))
     slots = r.get_json() or []
-    check('farmer sees slots with remaining capacity',
-          r.status_code == 200 and len(slots) == 2 and slots[0]['remaining'] == 3 and slots[0]['booked'] == 0, slots)
+    check('farmer sees slots with per-tier quotas',
+          r.status_code == 200 and len(slots) == 2 and slots[0]['cap_high'] == 5
+          and slots[0]['cap_mid'] == 3 and slots[0]['cap_low'] == 2
+          and slots[0]['remaining_high'] == 5 and slots[0]['remaining'] == 10, slots)
     check('bad slot query rejected (400)', farmer_a.get('/api/slots?centre_id=abc&date=' + day5).status_code == 400)
 
 
 def test_booking_capacity_and_queue():
-    section('booking, token, capacity, queue isolation')
+    # Quota plan for this suite: slot capacity 4 -> High 1, Mid 2, Low 1 (set by admin).
+    section('booking, token, tier quota, queue isolation')
     centre, second = S['centre'], S['second_centre']
     day6 = future(6)
     S['day6'] = day6
-    slot_cap2 = make_slot(centre['id'], day6, '09:00 AM', '10:00 AM', capacity=2)
+    slot_cap2 = make_slot(centre['id'], day6, '09:00 AM', '10:00 AM', capacity=4, quotas=(1, 2, 1))
     S['slot_cap2'] = slot_cap2
     farmer_a = S['farmer_a']
 
-    r = farmer_a.post('/api/book', json={'crop': 'Rice', 'slot_id': slot_cap2})
+    check('quantity mapping: 5 tons -> High, 1 ton -> Mid, 0.5 -> Low',
+          kf.quantity_tier(5) == 'High' and kf.quantity_tier(4.9) == 'Mid'
+          and kf.quantity_tier(1) == 'Mid' and kf.quantity_tier(0.9) == 'Low', None)
+    check('booking without quantity rejected (400)',
+          farmer_a.post('/api/book', json={'crop': 'Rice', 'slot_id': slot_cap2}).status_code == 400)
+    check('zero quantity rejected (400)',
+          farmer_a.post('/api/book', json={'crop': 'Rice', 'quantity_tons': 0, 'slot_id': slot_cap2}).status_code == 400)
+
+    r = farmer_a.post('/api/book', json={'crop': 'Rice', 'quantity_tons': 6, 'slot_id': slot_cap2})
     body = r.get_json() or {}
     S['booking_a'], S['token_a'] = body.get('booking_id'), body.get('token')
-    check('farmer A books the slot and receives a token',
-          r.status_code == 201 and body.get('token', 0) >= 1 and body.get('ahead') == 0 and body.get('position') == 1, body)
+    check('high farmer (6t) books and receives a token',
+          r.status_code == 201 and body.get('token', 0) >= 1 and body.get('tier') == 'High'
+          and body.get('ahead') == 0 and body.get('position') == 1, body)
     with kf.engine.connect() as c:
-        stored = c.execute(kf.text('SELECT id,token,status,crop,user_id FROM bookings WHERE id=:id'), {'id': S['booking_a']}).mappings().first()
-    check('booking is persisted with Waiting status',
-          stored is not None and stored['status'] == 'Waiting' and stored['crop'] == 'Rice' and stored['user_id'], dict(stored) if stored else None)
+        stored = c.execute(kf.text('SELECT id,token,status,crop,tier,quantity_tons,user_id FROM bookings WHERE id=:id'), {'id': S['booking_a']}).mappings().first()
+    check('booking is persisted as Waiting/High with quantity',
+          stored is not None and stored['status'] == 'Waiting' and stored['tier'] == 'High'
+          and float(stored['quantity_tons']) == 6 and stored['user_id'], dict(stored) if stored else None)
     check('duplicate active booking blocked (409)',
-          farmer_a.post('/api/book', json={'crop': 'Rice', 'slot_id': slot_cap2}).status_code == 409)
-    check('booking without a crop rejected (400)', farmer_a.post('/api/book', json={'slot_id': slot_cap2}).status_code == 400)
+          farmer_a.post('/api/book', json={'crop': 'Rice', 'quantity_tons': 6, 'slot_id': slot_cap2}).status_code == 409)
+    check('booking without a crop rejected (400)', farmer_a.post('/api/book', json={'quantity_tons': 6, 'slot_id': slot_cap2}).status_code == 400)
     check('booking an unknown slot rejected (404)',
-          farmer_a.post('/api/book', json={'crop': 'Rice', 'slot_id': 999999}).status_code == 404)
+          farmer_a.post('/api/book', json={'crop': 'Rice', 'quantity_tons': 6, 'slot_id': 999999}).status_code == 404)
+
+    farmer_high2 = farmer_client('Queue High Two', '9000000091')
+    check('second High farmer rejected: High quota is 1 (409)',
+          farmer_high2.post('/api/book', json={'crop': 'Rice', 'quantity_tons': 8, 'slot_id': slot_cap2}).status_code == 409)
 
     farmer_b = farmer_client('Queue Farmer B', '9000000011')
-    r = farmer_b.post('/api/book', json={'crop': 'Maize', 'slot_id': slot_cap2})
+    r = farmer_b.post('/api/book', json={'crop': 'Maize', 'quantity_tons': 2, 'slot_id': slot_cap2})
     body = r.get_json() or {}
     S['farmer_b'], S['booking_b'], S['token_b'] = farmer_b, body.get('booking_id'), body.get('token')
-    check('farmer B gets the next token and sees one farmer ahead',
-          r.status_code == 201 and body.get('token') > S['token_a'] and body.get('ahead') == 1, body)
+    check('mid farmer (2t) books even though a High seat is taken',
+          r.status_code == 201 and body.get('tier') == 'Mid', body)
+
+    farmer_b2 = farmer_client('Queue Farmer B2', '9000000013')
+    r = farmer_b2.post('/api/book', json={'crop': 'Maize', 'quantity_tons': 3, 'slot_id': slot_cap2})
+    check('second Mid farmer (3t) fills the Mid quota', r.status_code == 201, r.get_json())
+    S['farmer_b2'] = farmer_b2
+    S['booking_b2'] = (r.get_json() or {}).get('booking_id')
+
+    farmer_mid3 = farmer_client('Queue Mid Three', '9000000092')
+    check('third Mid farmer rejected: Mid quota is 2 (409)',
+          farmer_mid3.post('/api/book', json={'crop': 'Wheat', 'quantity_tons': 1.5, 'slot_id': slot_cap2}).status_code == 409)
 
     farmer_c = farmer_client('Queue Farmer C', '9000000012')
     S['farmer_c'] = farmer_c
-    check('full slot rejects the third farmer (409)',
-          farmer_c.post('/api/book', json={'crop': 'Cotton', 'slot_id': slot_cap2}).status_code == 409)
+    r = farmer_c.post('/api/book', json={'crop': 'Cotton', 'quantity_tons': 0.5, 'slot_id': slot_cap2})
+    check('low farmer (0.5t) takes the last Low seat', r.status_code == 201 and (r.get_json() or {}).get('tier') == 'Low', r.get_json())
+    S['booking_c'] = (r.get_json() or {}).get('booking_id')
+    farmer_low2 = farmer_client('Queue Low Two', '9000000093')
+    check('second Low farmer rejected: Low quota is 1 (409)',
+          farmer_low2.post('/api/book', json={'crop': 'Cotton', 'quantity_tons': 0.4, 'slot_id': slot_cap2}).status_code == 409)
     slots = (farmer_a.get('/api/slots?centre_id=%s&date=%s' % (centre['id'], day6)).get_json()) or []
-    check('full slot reports zero remaining capacity',
-          slots and slots[0]['remaining'] == 0 and slots[0]['booked'] == 2, slots)
+    check('slot reports zero remaining in every tier',
+          slots and slots[0]['remaining'] == 0 and slots[0]['remaining_high'] == 0
+          and slots[0]['remaining_mid'] == 0 and slots[0]['remaining_low'] == 0, slots)
 
-    other_slot = make_slot(second['id'], day6, '09:00 AM', '10:00 AM', capacity=2)
-    r = farmer_c.post('/api/book', json={'crop': 'Cotton', 'slot_id': other_slot})
+    other_slot = make_slot(second['id'], day6, '09:00 AM', '10:00 AM', capacity=2, quotas=(1, 1, 0))
+    r = farmer_low2.post('/api/book', json={'crop': 'Cotton', 'quantity_tons': 0.5, 'slot_id': other_slot})
     body = r.get_json() or {}
-    S['booking_c'] = body.get('booking_id')
-    check('another centre can still be booked', r.status_code == 201, body)
-    check('queue isolation: other centre booking is not counted ahead of mine', body.get('ahead') == 0, body)
+    S['booking_low2'] = body.get('booking_id')
+    check('zero Low seats in other slot -> low farmer refused (409)', r.status_code == 409, body)
+    r = farmer_mid3.post('/api/book', json={'crop': 'Wheat', 'quantity_tons': 2, 'slot_id': other_slot})
+    check('other centre mid seat still bookable', r.status_code == 201, r.get_json())
 
     mine = farmer_a.get('/api/my-booking').get_json() or {}
-    check('farmer sees only their own booking plus queue position',
-          mine.get('token') == S['token_a'] and mine.get('ahead') == 0 and mine.get('position') == 1 and mine.get('centre'), mine)
+    check('high farmer sees their own booking with tier',
+          mine.get('token') == S['token_a'] and mine.get('tier') == 'High' and mine.get('centre'), mine)
     mine_b = farmer_b.get('/api/my-booking').get_json() or {}
-    check('farmer B sees exactly one farmer ahead', mine_b.get('ahead') == 1 and mine_b.get('position') == 2 and mine_b.get('queue_size') == 2, mine_b)
+    # High(1) + Mid(2) below B in queue; B itself is Mid with the smaller token, so only High A is ahead.
+    check('mid farmer B sees only the High farmer ahead (tier queue)',
+          mine_b.get('ahead') == 1 and mine_b.get('tier') == 'Mid', mine_b)
     mine_c = farmer_c.get('/api/my-booking').get_json() or {}
-    check('farmer C is first in the other centre queue', mine_c.get('ahead') == 0 and mine_c.get('queue_size') == 1, mine_c)
+    # Low C is behind High A + both Mid farmers.
+    check('low farmer C is last in the tier queue',
+          mine_c.get('ahead') == 3 and mine_c.get('tier') == 'Low', mine_c)
     check("farmer cannot open another farmer's booking (404)",
           farmer_a.get('/api/booking/%s' % S['booking_b']).status_code == 404)
     r = farmer_b.get('/api/booking/%s' % S['booking_b'])
@@ -244,7 +294,8 @@ def test_call_notification_and_status_machine():
 
     r = admin.post('/api/advance')
     body = r.get_json() or {}
-    check('advance calls the next waiting farmer', r.status_code == 200 and body.get('called') == S['booking_b'], body)
+    # Advance picks the earliest Waiting in High->Mid->Low order: B (Mid, smallest token) goes next.
+    check('advance calls the next waiting farmer in tier order', r.status_code == 200 and body.get('called') == S['booking_b'], body)
     check('farmer B is now Called', (farmer_b.get('/api/booking/%s' % S['booking_b']).get_json() or {}).get('status') == 'Called')
     notes_b = farmer_b.get('/api/notifications').get_json() or []
     check('farmer B receives their own call notification',
@@ -265,13 +316,14 @@ def test_cancellation_authorisation_and_past_dates():
     admin, farmer_a, centre = S['admin'], S['farmer_a'], S['centre']
 
     farmer_d = farmer_client('Queue Farmer D', '9000000021')
-    r = farmer_d.post('/api/book', json={'crop': 'Wheat', 'slot_id': S['slot_cap2']})
-    check('finished/cancelled bookings free the slot again', r.status_code == 201, r.get_json())
+    # A (High, Completed) + B (Mid, Cancelled) freed seats; D books Mid -> fills the Mid gap.
+    r = farmer_d.post('/api/book', json={'crop': 'Wheat', 'quantity_tons': 2, 'slot_id': S['slot_cap2']})
+    check('finished/cancelled bookings free the tier seats again', r.status_code == 201, r.get_json())
     r = farmer_d.post('/api/my-booking/cancel')
     check('farmer can cancel their own waiting booking',
           r.status_code == 200 and (r.get_json() or {}).get('status') == 'Cancelled', r.get_json())
     check('cancelling twice is refused (409)', farmer_d.post('/api/my-booking/cancel').status_code == 409)
-    r = farmer_d.post('/api/book', json={'crop': 'Wheat', 'slot_id': S['slot_cap2']})
+    r = farmer_d.post('/api/book', json={'crop': 'Wheat', 'quantity_tons': 2, 'slot_id': S['slot_cap2']})
     check('a cancelled farmer can book a new slot', r.status_code == 201, r.get_json())
     check('re-booked farmer is Waiting again', (farmer_d.get('/api/my-booking').get_json() or {}).get('status') == 'Waiting')
 
@@ -285,7 +337,7 @@ def test_cancellation_authorisation_and_past_dates():
 
     past_slot = make_slot(centre['id'], past(1), '09:00 AM', '10:00 AM', capacity=2)
     farmer_e = farmer_client('Queue Farmer E', '9000000022')
-    r = farmer_e.post('/api/book', json={'crop': 'Rice', 'slot_id': past_slot})
+    r = farmer_e.post('/api/book', json={'crop': 'Rice', 'quantity_tons': 2, 'slot_id': past_slot})
     check('booking a past date is rejected (400)', r.status_code == 400, r.status_code)
 
 
@@ -293,15 +345,15 @@ def test_security_and_concurrency():
     section('origin guard, session, concurrent booking')
     centre = S['centre']
     farmer_f = farmer_client('Queue Farmer F', '9000000031')
-    slot_origin = make_slot(centre['id'], future(9), '10:00 AM', '11:00 AM', capacity=1)
-    r = farmer_f.post('/api/book', json={'crop': 'Rice', 'slot_id': slot_origin}, headers={'Origin': 'https://evil.example'})
+    slot_origin = make_slot(centre['id'], future(9), '10:00 AM', '11:00 AM', capacity=1, quotas=(1, 0, 0))
+    r = farmer_f.post('/api/book', json={'crop': 'Rice', 'quantity_tons': 6, 'slot_id': slot_origin}, headers={'Origin': 'https://evil.example'})
     check('cross-origin booking is blocked (403)', r.status_code == 403, r.status_code)
-    r = farmer_f.post('/api/book', json={'crop': 'Rice', 'slot_id': slot_origin}, headers={'Origin': 'http://localhost'})
+    r = farmer_f.post('/api/book', json={'crop': 'Rice', 'quantity_tons': 6, 'slot_id': slot_origin}, headers={'Origin': 'http://localhost'})
     check('same-origin booking is allowed', r.status_code == 201, (r.status_code, r.get_json()))
     check('logout ends the session',
           farmer_f.post('/logout').status_code == 200 and farmer_f.get('/api/my-booking').status_code == 401)
 
-    concurrency_slot = make_slot(centre['id'], future(10), '09:00 AM', '10:00 AM', capacity=2)
+    concurrency_slot = make_slot(centre['id'], future(10), '09:00 AM', '10:00 AM', capacity=2, quotas=(2, 0, 0))
     phones = ['9000000041', '9000000042', '9000000043', '9000000044', '9000000045']
     for i, phone in enumerate(phones):
         farmer_client('Concurrent Farmer %d' % i, phone)
@@ -310,7 +362,7 @@ def test_security_and_concurrency():
     def attempt(phone):
         c = client()
         c.post('/login', json={'identifier': phone, 'password': 'Farmer@123'})
-        r = c.post('/api/book', json={'crop': 'Rice', 'slot_id': concurrency_slot})
+        r = c.post('/api/book', json={'crop': 'Rice', 'quantity_tons': 6, 'slot_id': concurrency_slot})
         with lock:
             results[phone] = (r.status_code, (r.get_json() or {}).get('token'))
 
@@ -321,7 +373,7 @@ def test_security_and_concurrency():
         t.join()
     winners = [p for p, (code, _) in results.items() if code == 201]
     tokens = [tok for code, tok in results.values() if code == 201]
-    check('5 concurrent farmers on a capacity-2 slot -> exactly 2 succeed', len(winners) == 2, results)
+    check('5 concurrent High farmers on a 2-seat High quota -> exactly 2 succeed', len(winners) == 2, results)
     check('the losing threads receive a conflict (409)',
           all(code == 409 for code, _ in results.values() if code != 201), results)
     check('concurrent tokens are unique', len(set(tokens)) == len(tokens), tokens)
@@ -341,8 +393,14 @@ def test_admin_stats_filters_and_throttling():
 
     rows = admin.get('/api/bookings').get_json() or []
     check('admin sees the queue list', len(rows) >= 5, len(rows))
-    rows = admin.get('/api/bookings?date=' + S['day6']).get_json() or []
-    check('date filter works', bool(rows) and all(x['slot_date'] == S['day6'] for x in rows), len(rows))
+    # Queue is tier-ordered: within day6, every High row comes before Mid, Mid before Low.
+    day6rows = admin.get('/api/bookings?date=' + S['day6']).get_json() or []
+    rank = {'High': 0, 'Mid': 1, 'Low': 2}
+    order = [rank.get(x.get('tier'), 9) for x in day6rows]
+    check('tier filter works', all(x.get('tier') == 'High' for x in (admin.get('/api/bookings?tier=High').get_json() or [])), None)
+    check('invalid tier filter rejected (400)', admin.get('/api/bookings?tier=Ultra').status_code == 400)
+    check('date filter works', bool(day6rows) and all(x['slot_date'] == S['day6'] for x in day6rows), len(day6rows))
+    check('admin queue is High->Mid->Low ordered', order == sorted(order), order)
     rows = admin.get('/api/bookings?status=Cancelled').get_json() or []
     check('status filter works', bool(rows) and all(x['status'] == 'Cancelled' for x in rows), len(rows))
     rows = admin.get('/api/bookings?centre_id=%s' % S['second_centre']['id']).get_json() or []
@@ -368,7 +426,7 @@ def test_rendered_pages_and_i18n_assets():
     check('farmer page loads both i18n files', '/static/i18n.strings.js' in page and '/static/i18n.js' in page)
     check('farmer page keeps token, queue, My Turn, notification and cancel elements',
           all(x in page for x in ('id="token"', 'id="queueText"', 'id="menuStatus"', 'id="turnToast"',
-                                  'id="notifications"', 'id="cancelBtn"', 'id="slots"')))
+                                  'id="notifications"', 'id="cancelBtn"', 'id="slots"', 'id="quantity"')))
     check('farmer page uses translation keys instead of hard-coded text', 'data-i18n="farmer.book"' in page)
     check('no implicit DOM globals are used in the farmer script', 'name.value' not in page and 'centre.value' in page)
 

@@ -66,6 +66,23 @@ WAITING, CALLED, SERVING, COMPLETED, CANCELLED = 'Waiting', 'Called', 'Serving',
 ACTIVE_STATES = (WAITING, CALLED, SERVING)      # bookings that still occupy slot capacity
 ACTIVE_SQL = "('Waiting','Called','Serving')"
 ALL_STATES = (WAITING, CALLED, SERVING, COMPLETED, CANCELLED)
+# Quantity tiers (tons): HIGH >= 5, MID 1..5 (5 excluded -> HIGH), LOW < 1.
+TIER_HIGH, TIER_MID, TIER_LOW = 'High', 'Mid', 'Low'
+TIER_ORDER = {TIER_HIGH: 0, TIER_MID: 1, TIER_LOW: 2}
+TIER_SQL_ORDER = "CASE b.tier WHEN 'High' THEN 0 WHEN 'Mid' THEN 1 ELSE 2 END"
+
+
+def quantity_tier(quantity):
+    """Map a tonnage to its strict priority tier (server-side authority)."""
+    try:
+        q = float(quantity)
+    except (TypeError, ValueError):
+        return None
+    if q >= 5:
+        return TIER_HIGH
+    if q >= 1:
+        return TIER_MID
+    return TIER_LOW
 VALID_TRANSITIONS = {                            # PRD section 10 - no invalid state jumps
     WAITING: {CALLED, SERVING, CANCELLED},
     CALLED: {SERVING, WAITING, CANCELLED},
@@ -99,10 +116,15 @@ def db_init():
         c.execute(text(f'''CREATE TABLE IF NOT EXISTS slots (
             id {pk}, centre_id INTEGER NOT NULL, slot_date VARCHAR(20) NOT NULL,
             start_time VARCHAR(20) NOT NULL, end_time VARCHAR(20) NOT NULL,
-            capacity INTEGER NOT NULL, UNIQUE(centre_id, slot_date, start_time))'''))
+            capacity INTEGER NOT NULL,
+            cap_high INTEGER NOT NULL DEFAULT 0, cap_mid INTEGER NOT NULL DEFAULT 0,
+            cap_low INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(centre_id, slot_date, start_time))'''))
         c.execute(text(f'''CREATE TABLE IF NOT EXISTS bookings (
             id {pk}, user_id INTEGER, slot_id INTEGER NOT NULL, name VARCHAR(200) NOT NULL,
-            phone VARCHAR(30) NOT NULL, crop VARCHAR(100) NOT NULL, token INTEGER NOT NULL,
+            phone VARCHAR(30) NOT NULL, crop VARCHAR(100) NOT NULL,
+            quantity_tons REAL NOT NULL DEFAULT 0, tier VARCHAR(10) NOT NULL DEFAULT 'Low',
+            token INTEGER NOT NULL,
             status VARCHAR(30) NOT NULL DEFAULT 'Waiting', procurement_status VARCHAR(50) NOT NULL DEFAULT 'Booked',
             payment_status VARCHAR(50) NOT NULL DEFAULT 'Not started', created_at VARCHAR(50) NOT NULL)'''))
         c.execute(text(f'''CREATE TABLE IF NOT EXISTS notifications (
@@ -119,8 +141,35 @@ def db_init():
             booking_cols = {r[1] for r in c.execute(text("PRAGMA table_info(bookings)")).fetchall()}
             if 'user_id' not in booking_cols:
                 c.execute(text('ALTER TABLE bookings ADD COLUMN user_id INTEGER'))
+            if 'quantity_tons' not in booking_cols:
+                c.execute(text('ALTER TABLE bookings ADD COLUMN quantity_tons REAL NOT NULL DEFAULT 0'))
+            if 'tier' not in booking_cols:
+                c.execute(text("ALTER TABLE bookings ADD COLUMN tier VARCHAR(10) NOT NULL DEFAULT 'Low'"))
+            slot_cols = {r[1] for r in c.execute(text("PRAGMA table_info(slots)")).fetchall()}
+            for col in ('cap_high', 'cap_mid', 'cap_low'):
+                if col not in slot_cols:
+                    c.execute(text(f'ALTER TABLE slots ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0'))
+            # Old slots created before quotas: split capacity 50/30/20 across High/Mid/Low.
+            c.execute(text('''UPDATE slots SET
+                    cap_high = CAST(capacity * 50 / 100 AS INTEGER),
+                    cap_mid = CAST(capacity * 30 / 100 AS INTEGER),
+                    cap_low = capacity - CAST(capacity * 50 / 100 AS INTEGER) - CAST(capacity * 30 / 100 AS INTEGER)
+                WHERE cap_high + cap_mid + cap_low <= 0 AND capacity > 0'''))
+            # Old bookings created before quantity: keep them as Low tier.
+            c.execute(text("UPDATE bookings SET tier='Low' WHERE tier IS NULL OR tier=''"))
         else:
             c.execute(text("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS user_id INTEGER"))
+            c.execute(text("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS quantity_tons DOUBLE PRECISION NOT NULL DEFAULT 0"))
+            c.execute(text("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS tier VARCHAR(10) NOT NULL DEFAULT 'Low'"))
+            c.execute(text("ALTER TABLE slots ADD COLUMN IF NOT EXISTS cap_high INTEGER NOT NULL DEFAULT 0"))
+            c.execute(text("ALTER TABLE slots ADD COLUMN IF NOT EXISTS cap_mid INTEGER NOT NULL DEFAULT 0"))
+            c.execute(text("ALTER TABLE slots ADD COLUMN IF NOT EXISTS cap_low INTEGER NOT NULL DEFAULT 0"))
+            c.execute(text('''UPDATE slots SET
+                    cap_high = (capacity * 50) / 100,
+                    cap_mid = (capacity * 30) / 100,
+                    cap_low = capacity - ((capacity * 50) / 100) - ((capacity * 30) / 100)
+                WHERE cap_high + cap_mid + cap_low <= 0 AND capacity > 0'''))
+            c.execute(text("UPDATE bookings SET tier='Low' WHERE tier IS NULL OR tier=''"))
         if c.execute(text('SELECT COUNT(*) FROM centres')).scalar() == 0:
             c.execute(text("INSERT INTO centres(name,daily_capacity) VALUES ('Main Procurement Centre',40),('Village Collection Centre',30),('District Procurement Centre',60)"))
         admin = c.execute(text("SELECT id FROM users WHERE role='admin' LIMIT 1")).first()
@@ -227,6 +276,8 @@ def block_cross_site_writes():
         (request.host or '').lower(),
         (request.headers.get('X-Forwarded-Host') or '').lower(),
         (request.environ.get('HTTP_HOST') or '').lower(),
+        'localhost', '127.0.0.1', 'localhost:80', 'localhost:443',
+        '127.0.0.1:80', '127.0.0.1:443', 'localhost:5000', '127.0.0.1:5000',
     }
     allowed.discard('')
     if urlparse(origin).netloc.lower() in allowed:
@@ -354,7 +405,7 @@ def centres(): return jsonify(rows('SELECT * FROM centres ORDER BY id'))
 @app.post('/api/generate-slots')
 @login_required('admin')
 def generate_slots():
-    """Create capacity-controlled slots for one centre and date (FR-05, FR-06)."""
+    """Create slots for one centre and date with High/Mid/Low quotas (strict, sum = capacity)."""
     data=request.get_json(silent=True) or {}
     raw_date=str(data.get('date','')).strip()
     try:
@@ -364,6 +415,21 @@ def generate_slots():
     if not valid_date_str(raw_date): return api_error('Choose a valid date (YYYY-MM-DD).',400)
     if raw_date < today_str(): return api_error('Slots cannot be created for a past date.',400)
     if not 1 <= cap <= 200: return api_error('Capacity must be between 1 and 200 farmers.',400)
+    # Per-tier quotas: admin sets High/Mid/Low seats; default split 50/30/20.
+    try:
+        qh = int(data.get('cap_high', (cap * 50) // 100))
+        qm = int(data.get('cap_mid', (cap * 30) // 100))
+    except (TypeError, ValueError):
+        return api_error('Tier seats must be whole numbers.', 400)
+    ql = cap - qh - qm if data.get('cap_low') is None else None
+    if ql is None:
+        try:
+            ql = int(data.get('cap_low'))
+        except (TypeError, ValueError):
+            return api_error('Tier seats must be whole numbers.', 400)
+    if min(qh, qm, ql) < 0: return api_error('Tier seats cannot be negative.', 400)
+    if qh + qm + ql != cap:
+        return api_error(f'High + Mid + Low seats must equal capacity ({cap}).', 400)
     if interval not in (15,30,45,60,90,120): return api_error('Slot length must be 15, 30, 45, 60, 90 or 120 minutes.',400)
     try:
         cur=datetime.strptime(str(data.get('start','09:00')),'%H:%M')
@@ -379,7 +445,7 @@ def generate_slots():
             start_label,end_label=cur.strftime('%I:%M %p'),nxt.strftime('%I:%M %p')
             exists=c.execute(text('SELECT id FROM slots WHERE centre_id=:cid AND slot_date=:d AND start_time=:a'),{'cid':cid,'d':raw_date,'a':start_label}).first()
             if not exists:
-                c.execute(text('INSERT INTO slots(centre_id,slot_date,start_time,end_time,capacity) VALUES(:cid,:d,:a,:b,:cap)'),{'cid':cid,'d':raw_date,'a':start_label,'b':end_label,'cap':cap})
+                c.execute(text('INSERT INTO slots(centre_id,slot_date,start_time,end_time,capacity,cap_high,cap_mid,cap_low) VALUES(:cid,:d,:a,:b,:cap,:qh,:qm,:ql)'),{'cid':cid,'d':raw_date,'a':start_label,'b':end_label,'cap':cap,'qh':qh,'qm':qm,'ql':ql})
                 created+=1
             cur=nxt
     return jsonify(success=True,created=created)
@@ -387,29 +453,50 @@ def generate_slots():
 @app.get('/api/slots')
 @login_required()
 def get_slots():
-    """Slot list with remaining capacity for one centre + date (FR-04, FR-06)."""
+    """Slot list with per-tier remaining seats for one centre + date (FR-04, FR-06)."""
     raw_date=(request.args.get('date') or '').strip()
     try: cid=int(request.args.get('centre_id'))
     except (TypeError,ValueError): return api_error('Choose a procurement centre.',400)
     if not valid_date_str(raw_date): return api_error('Choose a valid date (YYYY-MM-DD).',400)
-    return jsonify(rows(f'''SELECT s.id,s.centre_id,s.slot_date,s.start_time,s.end_time,s.capacity,c.name AS centre_name,
+    return jsonify(rows(f'''SELECT s.id,s.centre_id,s.slot_date,s.start_time,s.end_time,s.capacity,
+            COALESCE(s.cap_high,0) AS cap_high, COALESCE(s.cap_mid,0) AS cap_mid, COALESCE(s.cap_low,0) AS cap_low,
+            c.name AS centre_name,
             (SELECT COUNT(*) FROM bookings b WHERE b.slot_id=s.id AND b.status IN {ACTIVE_SQL}) AS booked,
-            (s.capacity-(SELECT COUNT(*) FROM bookings b WHERE b.slot_id=s.id AND b.status IN {ACTIVE_SQL})) AS remaining
+            (s.capacity-(SELECT COUNT(*) FROM bookings b WHERE b.slot_id=s.id AND b.status IN {ACTIVE_SQL})) AS remaining,
+            (SELECT COUNT(*) FROM bookings b WHERE b.slot_id=s.id AND b.tier='High' AND b.status IN {ACTIVE_SQL}) AS booked_high,
+            (SELECT COUNT(*) FROM bookings b WHERE b.slot_id=s.id AND b.tier='Mid' AND b.status IN {ACTIVE_SQL}) AS booked_mid,
+            (SELECT COUNT(*) FROM bookings b WHERE b.slot_id=s.id AND b.tier='Low' AND b.status IN {ACTIVE_SQL}) AS booked_low,
+            (COALESCE(s.cap_high,0)-(SELECT COUNT(*) FROM bookings b WHERE b.slot_id=s.id AND b.tier='High' AND b.status IN {ACTIVE_SQL})) AS remaining_high,
+            (COALESCE(s.cap_mid,0)-(SELECT COUNT(*) FROM bookings b WHERE b.slot_id=s.id AND b.tier='Mid' AND b.status IN {ACTIVE_SQL})) AS remaining_mid,
+            (COALESCE(s.cap_low,0)-(SELECT COUNT(*) FROM bookings b WHERE b.slot_id=s.id AND b.tier='Low' AND b.status IN {ACTIVE_SQL})) AS remaining_low
         FROM slots s JOIN centres c ON c.id=s.centre_id
         WHERE s.centre_id=:cid AND s.slot_date=:d ORDER BY s.start_time''',{'cid':cid,'d':raw_date}))
 
 @app.post('/api/book')
 @login_required('farmer')
 def book():
-    """Capacity-controlled booking (FR-07, FR-08). The database is the final authority."""
+    """Book with strict High/Mid/Low quota - tier comes from quantity in tons. Same quantity = same tier."""
     data=request.get_json(silent=True) or {}
     u=current_user()
     crop=str(data.get('crop','')).strip()[:100]
     if not crop: return api_error('Choose a crop before booking.',400)
     try: sid=int(data.get('slot_id'))
     except (TypeError,ValueError): return api_error('Choose an available slot.',400)
+    try:
+        quantity=float(data.get('quantity_tons', data.get('quantity', '')))
+    except (TypeError,ValueError):
+        return api_error('Enter your quantity in tons (numbers only).',400)
+    if not 0 < quantity <= 100: return api_error('Quantity must be between 0.1 and 100 tons.',400)
+    tier=quantity_tier(quantity)
+    capacity_col={'High':'cap_high','Mid':'cap_mid','Low':'cap_low'}[tier]
+    tier_full_msg={
+        'High':'High-priority seats (5 tons and above) are full for this slot. Choose another slot.',
+        'Mid':'Mid-priority seats (1 to 5 tons) are full for this slot. Choose another slot.',
+        'Low':'Low-priority seats (below 1 ton) are full for this slot. Choose another slot.'}[tier]
     with booking_write_guard(), engine.begin() as c:
-        lock_sql='''SELECT s.id,s.slot_date,s.start_time,s.end_time,s.capacity,c.name AS centre_name
+        lock_sql='''SELECT s.id,s.slot_date,s.start_time,s.end_time,s.capacity,
+                COALESCE(s.cap_high,0) AS cap_high,COALESCE(s.cap_mid,0) AS cap_mid,COALESCE(s.cap_low,0) AS cap_low,
+                c.name AS centre_name
             FROM slots s JOIN centres c ON c.id=s.centre_id WHERE s.id=:id'''
         if not IS_SQLITE: lock_sql+=' FOR UPDATE'      # serialise bookings for this slot row
         slot=c.execute(text(lock_sql),{'id':sid}).mappings().first()
@@ -419,38 +506,58 @@ def book():
         # One active booking per farmer: also blocks accidental duplicate taps.
         dup=c.execute(text(f"SELECT id FROM bookings WHERE user_id=:uid AND status IN {ACTIVE_SQL} LIMIT 1"),{'uid':u['id']}).first()
         if dup: return api_error('You already have an active booking. Open your ticket instead.',409)
-        booked=int(c.execute(text(f'SELECT COUNT(*) FROM bookings WHERE slot_id=:id AND status IN {ACTIVE_SQL}'),{'id':sid}).scalar() or 0)
-        if booked>=slot['capacity']: return api_error('This slot is full. Please choose another slot.',409)
-        # One conditional INSERT does the capacity check, the token allocation and the write
-        # together, so two simultaneous farmers can never overbook the same slot.
-        q=c.execute(text(f'''INSERT INTO bookings(user_id,slot_id,name,phone,crop,token,status,procurement_status,payment_status,created_at)
+        quota=int(slot[capacity_col] or 0)
+        taken=int(c.execute(text(f"SELECT COUNT(*) FROM bookings WHERE slot_id=:id AND tier=:tier AND status IN {ACTIVE_SQL}"),{'id':sid,'tier':tier}).scalar() or 0)
+        if taken>=quota: return api_error(tier_full_msg,409)
+        # One conditional INSERT enforces the tier quota + allocates the token, so two
+        # simultaneous farmers of the same tier can never overbook the same quota.
+        q=c.execute(text(f'''INSERT INTO bookings(user_id,slot_id,name,phone,crop,quantity_tons,tier,token,status,procurement_status,payment_status,created_at)
             SELECT CAST(:uid AS INTEGER),CAST(:sid AS INTEGER),CAST(:n AS VARCHAR(200)),CAST(:p AS VARCHAR(30)),CAST(:crop AS VARCHAR(100)),
+                   CAST(:qty AS REAL),CAST(:tier AS VARCHAR(10)),
                    (SELECT COALESCE(MAX(token),0)+1 FROM bookings),'Waiting','Booked','Not started',CAST(:now AS VARCHAR(50))
-            WHERE (SELECT COUNT(*) FROM bookings WHERE slot_id=CAST(:sid AS INTEGER) AND status IN {ACTIVE_SQL})<CAST(:cap AS INTEGER)
+            WHERE (SELECT COUNT(*) FROM bookings WHERE slot_id=CAST(:sid AS INTEGER) AND tier=CAST(:tier AS VARCHAR(10)) AND status IN {ACTIVE_SQL})<CAST(:quota AS INTEGER)
             RETURNING id,token'''),
-            {'uid':u['id'],'sid':sid,'n':u['name'],'p':u['phone'],'crop':crop,'now':now_iso(),'cap':slot['capacity']})
+            {'uid':u['id'],'sid':sid,'n':u['name'],'p':u['phone'],'crop':crop,'qty':quantity,'tier':tier,'now':now_iso(),'quota':quota})
         row=q.mappings().first()
-        if not row: return api_error('This slot was just filled. Please choose another slot.',409)
+        if not row and IS_SQLITE:
+            # SQLite cannot reference the row being RETURNED inside its own SELECT subquery,
+            # so the conditional INSERT above writes nothing there. Fall back to an
+            # explicit tier-quota check + plain INSERT under the same write guard + transaction.
+            taken2=int(c.execute(text(f"SELECT COUNT(*) FROM bookings WHERE slot_id=:id AND tier=:tier AND status IN {ACTIVE_SQL}"),{'id':sid,'tier':tier}).scalar() or 0)
+            if taken2>=quota: return api_error(tier_full_msg,409)
+            nxt=int(c.execute(text('SELECT COALESCE(MAX(token),0)+1 FROM bookings')).scalar() or 1)
+            c.execute(text('''INSERT INTO bookings(user_id,slot_id,name,phone,crop,quantity_tons,tier,token,status,procurement_status,payment_status,created_at)
+                VALUES(:uid,:sid,:n,:p,:crop,:qty,:tier,:tok,'Waiting','Booked','Not started',:now)'''),
+                {'uid':u['id'],'sid':sid,'n':u['name'],'p':u['phone'],'crop':crop,'qty':quantity,'tier':tier,'tok':nxt,'now':now_iso()})
+            row={'id':c.execute(text('SELECT id FROM bookings WHERE user_id=:uid AND slot_id=:sid ORDER BY id DESC LIMIT 1'),{'uid':u['id'],'sid':sid}).scalar(),'token':nxt}
+        if not row: return api_error(tier_full_msg,409)
         bid,token=int(row['id']),int(row['token'])
         queue_size=int(c.execute(text(f'SELECT COUNT(*) FROM bookings WHERE slot_id=:id AND status IN {ACTIVE_SQL}'),{'id':sid}).scalar() or 1)
     return jsonify(success=True,booking_id=bid,token=token,slot=f"{slot['start_time']} - {slot['end_time']}",
-                   centre=slot['centre_name'],slot_date=slot['slot_date'],ahead=queue_size-1,position=queue_size),201
+                   centre=slot['centre_name'],slot_date=slot['slot_date'],tier=tier,quantity_tons=quantity,
+                   ahead=queue_size-1,position=queue_size),201
 
 
 def queue_metrics(item):
     """Queue position inside the farmer's own centre+date+slot queue (FR-09, FR-11).
 
-    Only bookings of the same slot are counted, so unrelated centres or slots
-    can never leak into a farmer's position.
+    Ordering: High tier first, then Mid, then Low; token breaks ties inside a tier.
+    Unrelated centres or slots can never leak into a farmer's position.
     """
     sid=item['slot_id']; token=item['token']; status=item.get('status')
+    tier=item.get('tier')
     if status in ACTIVE_STATES:
         queue_size=int(one(f'SELECT COUNT(*) n FROM bookings b WHERE b.slot_id=:sid AND b.status IN {ACTIVE_SQL}',{'sid':sid})['n'] or 1)
         serving=rows("SELECT token FROM bookings WHERE slot_id=:sid AND status='Serving' ORDER BY token LIMIT 1",{'sid':sid})
         # A waiting farmer is behind every booking still in this slot's pipeline.
         # A farmer who is already called/serving is at the counter, so nobody is ahead of them.
-        ahead=0 if status in (CALLED,SERVING) else int(one(f'''SELECT COUNT(*) n FROM bookings b WHERE b.slot_id=:sid AND b.status IN {ACTIVE_SQL} AND b.token<:token''',
-                      {'sid':sid,'token':token})['n'] or 0)
+        if status in (CALLED,SERVING):
+            ahead=0
+        else:
+            ahead=int(one(f'''SELECT COUNT(*) n FROM bookings b WHERE b.slot_id=:sid AND b.status IN {ACTIVE_SQL}
+                AND ({TIER_SQL_ORDER} < (CASE :tier WHEN 'High' THEN 0 WHEN 'Mid' THEN 1 ELSE 2 END)
+                     OR ({TIER_SQL_ORDER} = (CASE :tier WHEN 'High' THEN 0 WHEN 'Mid' THEN 1 ELSE 2 END) AND b.token<:token))''',
+                      {'sid':sid,'token':token,'tier':tier or 'Low'})['n'] or 0)
     else:
         ahead=0; queue_size=1; serving=[]
     item['ahead']=ahead
@@ -461,7 +568,7 @@ def queue_metrics(item):
 
 
 def booking_row_for_user(uid):
-    r=rows('''SELECT b.id,b.user_id,b.slot_id,b.name,b.phone,b.crop,b.token,b.status,b.procurement_status,b.created_at,
+    r=rows('''SELECT b.id,b.user_id,b.slot_id,b.name,b.phone,b.crop,b.quantity_tons,b.tier,b.token,b.status,b.procurement_status,b.created_at,
             s.slot_date,s.start_time,s.end_time,s.capacity,c.name AS centre
         FROM bookings b JOIN slots s ON s.id=b.slot_id JOIN centres c ON c.id=s.centre_id
         WHERE b.user_id=:uid ORDER BY b.id DESC LIMIT 1''',{'uid':uid})
@@ -501,7 +608,7 @@ def notification_read(nid):
 @app.get('/api/bookings')
 @login_required('admin')
 def bookings():
-    """Admin queue view (FR-16). Optional ?date=&centre_id=&status= filters."""
+    """Admin queue view (FR-16). Optional ?date=&centre_id=&status=&tier= filters."""
     where=[]; params={}
     raw_date=(request.args.get('date') or '').strip()
     if raw_date:
@@ -516,12 +623,16 @@ def bookings():
     if raw_status:
         if raw_status not in ALL_STATES: return api_error('Invalid status filter.',400)
         where.append('b.status=:st'); params['st']=raw_status
-    sql='''SELECT b.id,b.name,b.phone,b.crop,b.token,b.status,b.procurement_status,b.payment_status,b.created_at,
+    raw_tier=(request.args.get('tier') or '').strip()
+    if raw_tier:
+        if raw_tier not in (TIER_HIGH, TIER_MID, TIER_LOW): return api_error('Invalid tier filter.',400)
+        where.append('b.tier=:tier'); params['tier']=raw_tier
+    sql='''SELECT b.id,b.name,b.phone,b.crop,b.quantity_tons,b.tier,b.token,b.status,b.procurement_status,b.payment_status,b.created_at,
             s.id AS slot_id,s.slot_date,s.start_time,s.end_time,s.capacity,c.name AS centre,
             (s.capacity-(SELECT COUNT(*) FROM bookings b2 WHERE b2.slot_id=s.id AND b2.status IN ('Waiting','Called','Serving'))) AS remaining
         FROM bookings b JOIN slots s ON s.id=b.slot_id JOIN centres c ON c.id=s.centre_id'''
     if where: sql+=' WHERE '+' AND '.join(where)
-    sql+=' ORDER BY s.slot_date,s.start_time,b.token'
+    sql+=' ORDER BY s.slot_date,s.start_time,' + TIER_SQL_ORDER + ',b.token'
     return jsonify(rows(sql,params))
 
 @app.get('/api/stats')
@@ -536,6 +647,12 @@ def stats():
         SUM(CASE WHEN status='Cancelled' THEN 1 ELSE 0 END) cancelled
         FROM bookings""")[0]
     payload={k:int(v or 0) for k,v in r.items()}
+    tier_counts=rows(f"""SELECT
+        SUM(CASE WHEN tier='High' AND status IN {ACTIVE_SQL} THEN 1 ELSE 0 END) high,
+        SUM(CASE WHEN tier='Mid' AND status IN {ACTIVE_SQL} THEN 1 ELSE 0 END) mid,
+        SUM(CASE WHEN tier='Low' AND status IN {ACTIVE_SQL} THEN 1 ELSE 0 END) low
+        FROM bookings""")[0]
+    payload.update({('tier_'+k):int(v or 0) for k,v in tier_counts.items()})
     slots=rows(f"""SELECT COUNT(*) slots_total,
         SUM(CASE WHEN active<s.capacity THEN 1 ELSE 0 END) slots_available,
         SUM(CASE WHEN active>=s.capacity THEN 1 ELSE 0 END) slots_full
@@ -615,13 +732,13 @@ def cancel_my_booking():
 @app.post('/api/advance')
 @login_required('admin')
 def advance():
-    """Close the booking currently being served and call the next waiting farmer."""
+    """Close the booking currently being served and call the next waiting farmer (High tier first)."""
     completed=called=None
     serving=one("SELECT b.id FROM bookings b JOIN slots s ON s.id=b.slot_id WHERE b.status='Serving' ORDER BY s.slot_date,s.start_time,b.token LIMIT 1")
     if serving:
         result,_,_=transition_booking(serving['id'],COMPLETED,COMPLETE_MESSAGE,'info')
         completed=result['id'] if result else None
-    nxt=one("SELECT b.id FROM bookings b JOIN slots s ON s.id=b.slot_id WHERE b.status='Waiting' ORDER BY s.slot_date,s.start_time,b.token LIMIT 1")
+    nxt=one("SELECT b.id FROM bookings b JOIN slots s ON s.id=b.slot_id WHERE b.status='Waiting' ORDER BY s.slot_date,s.start_time,"+TIER_SQL_ORDER+",b.token LIMIT 1")
     if nxt:
         result,_,_=transition_booking(nxt['id'],CALLED,CALL_MESSAGE,'call')
         called=result['id'] if result else None
@@ -638,7 +755,7 @@ def reset():
 def booking(bid):
     """Farmer polling endpoint - a farmer can only ever open their own booking (NFR-01)."""
     u=current_user()
-    item=rows('''SELECT b.id,b.user_id,b.slot_id,b.name,b.phone,b.crop,b.token,b.status,b.procurement_status,b.created_at,
+    item=rows('''SELECT b.id,b.user_id,b.slot_id,b.name,b.phone,b.crop,b.quantity_tons,b.tier,b.token,b.status,b.procurement_status,b.created_at,
             s.slot_date,s.start_time,s.end_time,s.capacity,c.name AS centre
         FROM bookings b JOIN slots s ON s.id=b.slot_id JOIN centres c ON c.id=s.centre_id
         WHERE b.id=:id AND b.user_id=:uid''',{'id':bid,'uid':u['id']})

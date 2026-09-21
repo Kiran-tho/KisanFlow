@@ -18,7 +18,7 @@
   <div class="title">
     <small>ADMIN / CENTRE SETUP</small>
     <h1>Create daily slots</h1>
-    <p>Set the capacity and working hours. Once a slot is full it is no longer offered to farmers.</p>
+    <p>Set total capacity plus High (≥5 t), Mid (1–5 t) and Low (&lt;1 t) seats. Same quantity always lands in the same category; each category fills only its own seats.</p>
   </div>
   <div class="card form">
     <label>Centre
@@ -27,8 +27,17 @@
     <label>Date
       <input id="date" type="date">
     </label>
-    <label>Capacity per slot
+    <label>Capacity per slot (total farmers)
       <input id="capacity" type="number" value="10" min="1" max="200">
+    </label>
+    <label>High seats (≥5 tons)
+      <input id="capHigh" type="number" value="5" min="0" max="200">
+    </label>
+    <label>Mid seats (1–5 tons)
+      <input id="capMid" type="number" value="3" min="0" max="200">
+    </label>
+    <label>Low seats (&lt;1 ton)
+      <input id="capLow" type="number" value="2" min="0" max="200">
     </label>
     <label>Start time
       <input id="start" type="time" value="09:00">
@@ -95,6 +104,9 @@ async function generate() {
   const btn = $('generateBtn');
   const capacity = Number($('capacity').value);
   if (!(capacity >= 1 && capacity <= 200)) { show('Capacity must be between 1 and 200 farmers.'); return; }
+  let qh = Number($('capHigh').value), qm = Number($('capMid').value), ql = $('capLow').value === '' ? capacity - qh - qm : Number($('capLow').value);
+  if (![qh, qm, ql].every((n) => Number.isInteger(n) && n >= 0)) { show('Tier seats must be whole numbers (0 or more).'); return; }
+  if (qh + qm + ql !== capacity) { show('High + Mid + Low seats must equal capacity (' + capacity + '). Now: ' + (qh + qm + ql) + '.'); return; }
   if (!$('date').value) { show('Choose the date for these slots.'); return; }
   if ($('start').value >= $('end').value) { show('End time must be after start time.'); return; }
   btn.disabled = true;
@@ -105,6 +117,9 @@ async function generate() {
       centre_id: Number($('centre').value),
       date: $('date').value,
       capacity: capacity,
+      cap_high: qh,
+      cap_mid: qm,
+      cap_low: ql,
       start: $('start').value,
       end: $('end').value,
       interval: Number($('interval').value)
@@ -126,10 +141,14 @@ async function loadSlots() {
   const slots = (r.data || []).slice().sort((a, b) => slotMinutes(a.start_time) - slotMinutes(b.start_time));
   if (!slots.length) { $('slotRows').innerHTML = '<p class="emptySlots">No slots for this date yet.</p>'; return; }
   $('slotRows').innerHTML = slots.map((x) => {
-    const full = Number(x.booked) >= Number(x.capacity);
+    const booked = Number(x.booked), cap = Number(x.capacity);
+    const full = booked >= cap;
+    const tiers = 'H ' + (x.booked_high || 0) + '/' + (x.cap_high !== undefined ? x.cap_high : '?') +
+      ' • M ' + (x.booked_mid || 0) + '/' + (x.cap_mid !== undefined ? x.cap_mid : '?') +
+      ' • L ' + (x.booked_low || 0) + '/' + (x.cap_low !== undefined ? x.cap_low : '?');
     return '<div class="slotRow"><b>' + escapeHtml(x.start_time) + ' – ' + escapeHtml(x.end_time) + '</b>' +
-      '<span>' + escapeHtml(x.booked) + '/' + escapeHtml(x.capacity) + ' booked</span>' +
-      '<span class="pill ' + (full ? 'pill-cancelled' : 'pill-serving') + '">' + (full ? 'FULL' : (Math.max(0, Number(x.capacity) - Number(x.booked))) + ' LEFT') + '</span></div>';
+      '<span>' + escapeHtml(booked) + '/' + escapeHtml(cap) + ' booked (' + escapeHtml(tiers) + ')</span>' +
+      '<span class="pill ' + (full ? 'pill-cancelled' : 'pill-serving') + '">' + (full ? 'FULL' : (Math.max(0, cap - booked)) + ' LEFT') + '</span></div>';
   }).join('');
 }
 

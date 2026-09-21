@@ -1,10 +1,8 @@
 # KisanFlow — Delivery Checklist (tick box)
 
-Legend: `[x]` done · `[ ]` still open
-Stack (confirmed with the user): **HTML + CSS + vanilla JS frontend, Flask JSON API backend,
-SQLAlchemy — SQLite local / PostgreSQL production.**
+TIER RULE (tons): HIGH >= 5 · MID 1-5 · LOW < 1. Same quantity = same tier, strict seats.
 
-Last verified run: `.\venv\Scripts\python.exe tests\test_workflows.py` → **118 passed, 0 failed**
+Last verified run: `.\venv\Scripts\python.exe tests\test_workflows.py` → **134 passed, 0 failed**
 
 ---
 
@@ -124,7 +122,10 @@ Last verified run: `.\venv\Scripts\python.exe tests\test_workflows.py` → **118
 - [x] Admin stats, date/status/centre filters, invalid filter 400
 - [x] Login throttling returns 429
 - [x] Rendered pages, i18n dictionary and static assets verified
-- [x] Result: **118 passed / 0 failed**
+- [x] Tier quotas: quantity mapping, tier-sum validation, per-tier 409s, 50/30/20 default split
+- [x] Tier queue High->Mid->Low + tier filter + tier-ordered admin list + tier-ordered advance
+- [x] 5-thread race on a 2-seat High quota → exactly 2 succeed, tokens unique
+- [x] Result: **134 passed / 0 failed**
 
 ## 5. Docs
 

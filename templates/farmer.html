@@ -45,6 +45,11 @@
           <option value="Other" data-i18n="crop.other">Other</option>
         </select>
       </label>
+      <label>
+        <span data-i18n="farmer.quantity">Quantity (tons)</span>
+        <input id="quantity" type="number" min="0.1" max="100" step="0.1" value="2" inputmode="decimal">
+      </label>
+      <p class="privacy" id="tierHint"></p>
       <div>
         <b data-i18n="farmer.slots">Available slots</b>
         <div id="slots" class="slots" aria-live="polite">Loading...</div>
@@ -69,6 +74,8 @@
         <div><span data-i18n="farmer.time">Time</span><b id="ticketTime">—</b></div>
         <div><span data-i18n="farmer.centre">Centre</span><b id="ticketCentre">—</b></div>
         <div><span data-i18n="farmer.crop">Crop</span><b id="ticketCrop">—</b></div>
+        <div><span data-i18n="farmer.quantity">Quantity (tons)</span><b id="ticketQty">—</b></div>
+        <div><span data-i18n="farmer.tier">Priority</span><b id="ticketTier">—</b></div>
       </div>
       <div class="queueBox">
         <small data-i18n="farmer.liveQueue">YOUR LIVE QUEUE</small>
@@ -174,6 +181,20 @@ async function loadCentres() {
   $('centre').innerHTML = r.data.map((x) => '<option value="' + x.id + '">' + escapeHtml(x.name) + '</option>').join('');
   await loadSlots();
 }
+function tierOf(qty) {
+  const q = Number(qty);
+  if (!(q > 0)) return '';
+  return q >= 5 ? 'High' : (q >= 1 ? 'Mid' : 'Low');
+}
+function tierLabel(tier) {
+  return tier ? KF.t('farmer.tier' + tier) : '—';
+}
+function updateTierHint() {
+  const hint = $('tierHint');
+  if (!hint) return;
+  const tier = tierOf($('quantity').value);
+  hint.textContent = tier ? KF.t('farmer.tierHint').replace('{tier}', tierLabel(tier)) : '';
+}
 async function loadSlots() {
   selectedSlotId = null;
   const centre = $('centre'), date = $('date'), slots = $('slots');
@@ -183,12 +204,20 @@ async function loadSlots() {
   if (!r.ok) { slots.innerHTML = ''; message('result', r.error); return; }
   const list = sortSlots(r.data);
   if (!list.length) { slots.innerHTML = '<div class="emptySlots">' + escapeHtml(KF.t('farmer.noSlots')) + '</div>'; return; }
+  const myTier = tierOf($('quantity').value) || 'Low';
   slots.innerHTML = list.map((x) => {
-    const full = Number(x.booked) >= Number(x.capacity);
-    const left = Math.max(0, Number(x.capacity) - Number(x.booked));
+    const capKey = { High: 'cap_high', Mid: 'cap_mid', Low: 'cap_low' }[myTier];
+    const remKey = { High: 'remaining_high', Mid: 'remaining_mid', Low: 'remaining_low' }[myTier];
+    const quota = Number(x[capKey] !== undefined ? x[capKey] : x.capacity);
+    const left = Math.max(0, Number(x[remKey] !== undefined ? x[remKey] : (Number(x.capacity) - Number(x.booked))));
+    const full = left <= 0;
+    const tierLine = 'H:' + Math.max(0, Number(x.remaining_high !== undefined ? x.remaining_high : 0)) +
+      ' M:' + Math.max(0, Number(x.remaining_mid !== undefined ? x.remaining_mid : 0)) +
+      ' L:' + Math.max(0, Number(x.remaining_low !== undefined ? x.remaining_low : 0));
     return '<button type="button" class="slot ' + (full ? 'fullslot' : '') + '"' + (full ? ' disabled' : '') +
       ' onclick="selectSlot(' + x.id + ', this)"><span>' + escapeHtml(x.start_time) + ' – ' + escapeHtml(x.end_time) + '</span>' +
-      '<small>' + escapeHtml(full ? KF.t('farmer.full') : KF.t('farmer.slotsLeft').replace('{n}', left)) + '</small></button>';
+      '<small>' + escapeHtml(full ? KF.t('farmer.full') : KF.t('farmer.slotsLeft').replace('{n}', left) + ' • ' + tierLabel(myTier)) + '</small>' +
+      '<small>' + escapeHtml(tierLine) + ' / ' + escapeHtml(quota + ' ' + tierLabel(myTier)) + '</small></button>';
   }).join('');
 }
 function selectSlot(id, el) {
@@ -199,10 +228,12 @@ function selectSlot(id, el) {
 async function book() {
   const btn = $('bookBtn');
   if (!selectedSlotId) { message('result', KF.t('farmer.chooseSlot')); return; }
+  const quantity = Number($('quantity').value);
+  if (!(quantity > 0 && quantity <= 100)) { message('result', KF.t('farmer.quantityError')); return; }
   message('result', '');
   btn.disabled = true;
   btn.textContent = KF.t('farmer.bookingNow');          /* blocks duplicate taps */
-  const r = await api('/api/book', { method: 'POST', body: JSON.stringify({ crop: $('crop').value, slot_id: selectedSlotId }) });
+  const r = await api('/api/book', { method: 'POST', body: JSON.stringify({ crop: $('crop').value, quantity_tons: quantity, slot_id: selectedSlotId }) });
   btn.disabled = false;
   btn.textContent = KF.t('farmer.book');
   if (!r.ok) {
@@ -254,6 +285,8 @@ function renderTicket(item) {
   $('ticketTime').textContent = (item.start_time || '') + ' – ' + (item.end_time || '');
   $('ticketCentre').textContent = item.centre || '—';
   $('ticketCrop').textContent = cropLabel(item.crop);
+  $('ticketQty').textContent = (item.quantity_tons !== undefined && item.quantity_tons !== null && item.quantity_tons !== '') ? (item.quantity_tons + ' t') : '—';
+  $('ticketTier').textContent = tierLabel(item.tier);
   $('status').textContent = statusLabel(item.status);
   if (item.status !== previousStatus && (item.status === 'Called' || item.status === 'Serving')) {
     const key = item.status === 'Called' ? 'farmer.notifCall' : 'farmer.notifServe';
@@ -371,6 +404,9 @@ const dateInput = $('date');
 dateInput.value = todayISO();
 $('centre').addEventListener('change', loadSlots);
 dateInput.addEventListener('change', loadSlots);
+$('quantity').addEventListener('input', () => { updateTierHint(); loadSlots(); });
+$('quantity').addEventListener('change', () => { updateTierHint(); loadSlots(); });
+updateTierHint();
 enableNotifications();
 loadCentres().then(refresh);
 loadNotifications(false);

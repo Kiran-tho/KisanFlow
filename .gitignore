@@ -6,6 +6,11 @@ __pycache__/
 *.db-wal
 *.db-shm
 procurement.db
+procurement_backup.db
+migrate_check.py
+tier_test.txt
+tier_test2.txt
+tier_test3.txt
 .env
 test_results.txt
 test_output.txt
